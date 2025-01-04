@@ -1,0 +1,6 @@
+export PATH="/usr/local/cuda-12.6/bin":$PATH
+export LD_LIBRARY_PATH="/usr/local/cuda-12.6/lib64":$LD_LIBRARY_PATH
+export LIBRARY_PATH="/usr/local/cuda-12.6/lib64":$LIBRARY_PATH
+nvcc -c  scatter.cu
+nvcc -c  ScatterGen_CircularHole.cpp
+g++ -o ScatterGen_CircularHole scatter.o ScatterGen_CircularHole.o -lcudart -L/usr/local/cuda-12.6
