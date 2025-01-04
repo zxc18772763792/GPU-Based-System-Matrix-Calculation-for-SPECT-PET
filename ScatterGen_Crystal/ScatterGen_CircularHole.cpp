@@ -3,7 +3,7 @@
 // ScatterGen.cpp
 // Calculate the scatter system matrix, with primary compton events only
 // run this program after the PE system matrix generation
-// usage: ./ScatterGen -PE "path/to/PE_SystemMatrix" -GeoCrystal "path/to/Scatter_SystemMatrix" -cuda int
+// usage: ./ScatterGen_Crystal -PE "path/to/PE_SystemMatrix" -GeoCrystal "path/to/Scatter_SystemMatrix" -cuda int
 // athour: xingchun zheng @ tsinghua university
 // last modified: 2024/12/21
 // version 1.0
