@@ -1,5 +1,7 @@
-// Generate SysMat on GPU with compton scatter
-// 2024/12/21
+// Generate System Matrix on GPU with primary compton scatter
+// author: xingchun zheng @ tsinghua university
+// last modified: 2024/12/21
+// version: 1.0
 
 #include <iostream>
 #define _USE_MATH_DEFINES
@@ -1936,7 +1938,7 @@ __global__ void collimatorScatterSysMatCuda(float* dst,
 
 __global__ void geometryRelationShip_Collimator2Crystal(unsigned int* dst_relation_collimator2crystal, float* deviceparameter_Detector, float* deviceparameter_Collimator)
 {
-	// 计算全局线程索引
+	
 	int numProjectionSingle = deviceparameter_Detector[0];
 	int numCollimatorHoles = deviceparameter_Collimator[10];
 	long long idx = static_cast<long long>(blockIdx.x) * static_cast<long long>(blockDim.x) + static_cast<long long>(threadIdx.x);
@@ -1944,20 +1946,20 @@ __global__ void geometryRelationShip_Collimator2Crystal(unsigned int* dst_relati
 
 	if (idx >= total_threads) return;
 
-	// 将线性索引转换为三维索引 (i, j, k)
+	
 	int k = idx % numProjectionSingle;
 	int j = (idx / numProjectionSingle) % numProjectionSingle;
 	int i = idx / (numProjectionSingle * numProjectionSingle);
 
-	// 计算最终的比特索引
+	
 	long long bit_idx = static_cast<long long>(i) * static_cast<long long>(numProjectionSingle) * static_cast<long long>(numProjectionSingle) + static_cast<long long>(j) * static_cast<long long>(numProjectionSingle) + static_cast<long long>(k);
 
-	// 计算对应的字索引和位偏移
+	
 	int bits_per_word = 32;
 	long long word_idx = bit_idx / bits_per_word;
 	int bit_offset = bit_idx % bits_per_word;
 
-	// 计算是否设置该位
+	
 	float xCollimator_i = deviceparameter_Collimator[9 * i + 100];
 	float yCollimator_i = (deviceparameter_Collimator[9 * i + 101] + deviceparameter_Collimator[9 * i + 102]) / 2.0f;
 	float zCollimator_i = deviceparameter_Collimator[9 * i + 103];
