@@ -11,7 +11,7 @@
 //                -GeoCollimator <path_to_CollimatorGeometryRelationship>
 //                -cuda <cuda_device_id>
 //
-// Author: Xingchun Zheng
+// Author: Xingchun Zheng @ tsinghua university
 // Last Modified: 2024/12/21
 // Version: 1.0
 
