@@ -1,5 +1,8 @@
-// ʹ��GPU���ɿ��ն�ɢ��ϵͳ����
-// �޸�ʱ��2024/11/24
+// GPU-based system matrix calculation for SPECT/PET systems
+// This program is designed for promary compton scatter contribution happened at collimator
+// author: xingchun zheng @ tsinghua university
+// last modified: 2024/12/12
+// version: 1.0
 
 #include <iostream>
 #define _USE_MATH_DEFINES
@@ -1434,7 +1437,7 @@ __global__ void collimatorScatterSysMatCuda(float* dst,
 
 __global__ void geometryRelationShip_Collimator2Crystal(unsigned int * dst_relation_collimator2crystal, float* deviceparameter_Detector, float* deviceparameter_Collimator)
 {
-	// 计算全局线程索引
+	
 	int numProjectionSingle = deviceparameter_Detector[0];
 	int numCollimatorHoles = deviceparameter_Collimator[10];
 	long long idx = static_cast<long long>(blockIdx.x) * static_cast<long long>(blockDim.x) + static_cast<long long>(threadIdx.x);
@@ -1442,20 +1445,20 @@ __global__ void geometryRelationShip_Collimator2Crystal(unsigned int * dst_relat
 
 	if (idx >= total_threads) return;
 
-	// 将线性索引转换为三维索引 (i, j, k)
+	
 	int k = idx % numProjectionSingle;
 	int j = (idx / numProjectionSingle) % numProjectionSingle;
 	int i = idx / (numProjectionSingle * numProjectionSingle);
 
-	// 计算最终的比特索引
+	
 	long long bit_idx = static_cast<long long>(i) * static_cast<long long>(numProjectionSingle) * static_cast<long long>(numProjectionSingle)+ static_cast<long long>(j) * static_cast<long long>(numProjectionSingle) + static_cast<long long>(k);
 
-	// 计算对应的字索引和位偏移
+	
 	int bits_per_word = 32;
 	long long word_idx = bit_idx / bits_per_word;
 	int bit_offset = bit_idx % bits_per_word;
 
-	// 计算是否设置该位
+	
 	float xCollimator_i = deviceparameter_Collimator[9 * i + 100];
 	float yCollimator_i = (deviceparameter_Collimator[9 * i + 101] + deviceparameter_Collimator[9 * i + 102]) / 2.0f;
 	float zCollimator_i = deviceparameter_Collimator[9 * i + 103];
@@ -1558,11 +1561,11 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 	unsigned int* deviceGeometryRelationShip_Collimator2Crystal;
 	unsigned int* hostGeometryRelationShip_Collimator2Crystal = new unsigned int[array_size]();
 
-	// 创建CUDA流
+	
 	cudaStream_t stream;
 	cudaStreamCreate(&stream);
 
-	// 分配固定内存
+	
 	float* h_parameter_Collimator;
 	cudaMallocHost(&h_parameter_Collimator, sizeof(float) * 80000);
 	memcpy(h_parameter_Collimator, parameter_Collimator, sizeof(float) * 80000);
@@ -1583,7 +1586,7 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 	cudaMallocHost(&h_PE_SysMat, sizeof(float) * numProjectionSingle * numImagebin);
 	memcpy(h_PE_SysMat, PE_SysMat, sizeof(float) * numProjectionSingle * numImagebin);
 
-	// 分配设备内存
+	
 	float* deviceMatrix;
 	cudaMalloc(&deviceMatrix, sizeof(float) * numProjectionSingle * numImagebin);
 	cudaMemset(deviceMatrix, 0, sizeof(float) * numProjectionSingle * numImagebin);
@@ -1630,13 +1633,13 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 			deviceparameter_Detector,
 			deviceparameter_Collimator);
 
-		// 同步以确保内核完成
+		
 		cudaStreamSynchronize(stream);
 
-		// 拷贝结果到主机
+		
 		cudaMemcpyAsync(hostGeometryRelationShip_Collimator2Crystal, deviceGeometryRelationShip_Collimator2Crystal, sizeof(unsigned int) * array_size, cudaMemcpyDeviceToHost, stream);
 
-		// 同步以确保拷贝完成
+		
 		cudaStreamSynchronize(stream);
 
 		cudaCheckError(cudaGetLastError());
@@ -1666,7 +1669,7 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 
 	}
 	
-	// 拷贝几何关系到设备
+	
 	cudaMalloc(&deviceGeometryRelationShip_Collimator2Crystal, sizeof(unsigned int) * array_size);
 	cudaMemcpyAsync(deviceGeometryRelationShip_Collimator2Crystal, hostGeometryRelationShip_Collimator2Crystal, sizeof(unsigned int) * array_size, cudaMemcpyHostToDevice, stream);
 
@@ -1696,19 +1699,18 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 		deviceGeometryRelationShip_Collimator2Crystal,
 		numProjectionSingle,
 		numImagebin);
-	// 异步拷贝结果回主机
-	// 检查内核启动是否有错误
+
 	cudaError_t err = cudaGetLastError();
 	if (err != cudaSuccess) {
 		std::cerr << "Kernel launch failed: " << cudaGetErrorString(err) << std::endl;
-		// 进行适当的错误处理，例如退出程序
+		
 	}
 
-	// 同步并检查设备错误
+	
 	err = cudaDeviceSynchronize();
 	if (err != cudaSuccess) {
 		std::cerr << "Kernel execution failed: " << cudaGetErrorString(err) << std::endl;
-		// 进行适当的错误处理，例如退出程序
+		
 	}
 
 	cudaMemcpyAsync(dst, deviceMatrix, sizeof(float) * numProjectionSingle * numImagebin, cudaMemcpyDeviceToHost, stream);
@@ -1716,12 +1718,12 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 	auto duration_CollimatorScatterSysMatCuda = std::chrono::duration_cast<std::chrono::milliseconds>(end_CollimatorScatterSysMatCuda - start_CollimatorScatterSysMatCuda);
 	cout << "Time of scatterSysMatCuda function: " << duration_CollimatorScatterSysMatCuda.count()/1000.0/60.0 << " min" << endl;
 
-	// 同步流
+	
 	cudaStreamSynchronize(stream);
 	cout << "########################" << endl;
 
 
-	// 释放资源
+	
 	cudaFreeHost(h_parameter_Collimator);
 	cudaFreeHost(h_parameter_Detector);
 	cudaFreeHost(h_parameter_Image);
@@ -1737,7 +1739,7 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 
 	delete[] hostGeometryRelationShip_Collimator2Crystal;
 
-	// 销毁CUDA流
+	
 	cudaStreamDestroy(stream);
 
 	return numImagebin;
