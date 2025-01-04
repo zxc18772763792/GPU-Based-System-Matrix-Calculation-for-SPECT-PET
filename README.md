@@ -12,8 +12,26 @@ Run the programe PESysMatGen as:
 Complie the ScatterGen_RayTracing_CircularHole folder, you can refer to the compile command as ./ScatterGen_RayTracing_CircularHole/bd.
 Run the programe ScatterGen_CircularHole as:
 ```
-   ./ScatterGen -PE <path_to_PE_SystemMatrix> 
+   ./ScatterGen_CircularHole -PE <path_to_PE_SystemMatrix> 
                 -GeoCrystal <path_to_CrystalGeometryRelationship>
+                -GeoCollimator <path_to_CollimatorGeometryRelationship>
+                -cuda <cuda_device_id>
+```
+
+# (Optinal) Calculate only the inter-crystal Primary Compton System Matix
+Complie the ScatterGen_Crystal folder, you can refer to the compile command as ./ScatterGen_Crystal/bd.
+Run the programe ScatterGen_Crystal as:
+```
+   ./ScatterGen_Crystal -PE <path_to_PE_SystemMatrix> 
+                -GeoCrystal <path_to_CrystalGeometryRelationship>
+                -cuda <cuda_device_id>
+```
+
+# (Optinal) Calculate only the collimator-crystal Primary Compton System Matix
+Complie the ScatterGen_Collimator folder, you can refer to the compile command as ./ScatterGen_Collimator/bd.
+Run the programe ScatterGen_Collimator as:
+```
+   ./ScatterGen_Collimator -PE <path_to_PE_SystemMatrix> 
                 -GeoCollimator <path_to_CollimatorGeometryRelationship>
                 -cuda <cuda_device_id>
 ```
