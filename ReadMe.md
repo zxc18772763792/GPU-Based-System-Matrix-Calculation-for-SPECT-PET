@@ -43,7 +43,7 @@ This project provides a GPU-based framework for calculating system matrices esse
 1. **Clone the Repository:**
 
    ```bash
-   git clone https://github.com/yourusername/GPU-Based-System-Matrix-Calculation-for-SPECT-PET.git
+   git clone https://github.com/zxc18772763792/GPU-Based-System-Matrix-Calculation-for-SPECT-PET.git
    cd GPU-Based-System-Matrix-Calculation-for-SPECT-PET
    ```
 
