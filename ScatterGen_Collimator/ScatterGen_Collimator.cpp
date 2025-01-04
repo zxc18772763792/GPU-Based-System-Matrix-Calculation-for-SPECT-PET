@@ -6,7 +6,7 @@
 // usage: ./ScatterGen_Collimator -PE "path/to/PE_SystemMatrix" -Geo "path/to/CollimatorHolesGeometryRelationship" -cuda int
 // athour: xingchun zheng
 // last modified: 2024/12/17
-// version 4.0
+// version 1.0
 
 #include <fstream> 
 #include <stdio.h>  
