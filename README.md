@@ -27,11 +27,9 @@ Run the programe ScatterGen_Crystal as:
                 -cuda <cuda_device_id>
 ```
 
-# (Optinal) Calculate only the collimator-crystal Primary Compton System Matix
-Complie the ScatterGen_Collimator folder, you can refer to the compile command as ./ScatterGen_Collimator/bd.
-Run the programe ScatterGen_Collimator as:
-```
-   ./ScatterGen_Collimator -PE <path_to_PE_SystemMatrix> 
-                -GeoCollimator <path_to_CollimatorGeometryRelationship>
-                -cuda <cuda_device_id>
-```
+# Feel Free to Contact Me :)
+I test this program with self-collimating SPECT system, this analytical system matrix matched perfect with experimental results. Calculation of photon electric system matrix with 160*160 2D FOV and 5632 crystals on a RTX 6000 Ada GPU only costs 3 mins. Calculation of primary compton scatter system matrix only costs 60 mins.
+There are still some hard codes, but I'm too busy to fix these problems, sorry about that. :( If you have any questions, feel free to contact me. :)
+
+E-mai: 18772763792@163.com, zhengxc21@mails.tsinghua.edu.cn
+Wechat: zxc18772763792
