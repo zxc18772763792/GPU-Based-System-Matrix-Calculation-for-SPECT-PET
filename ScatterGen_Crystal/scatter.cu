@@ -1,4 +1,5 @@
 // Generate System Matrix on GPU with inter crystal primary compton scatter
+// author: xingchun zheng @ tsinghua university
 // last modified: 2024/12/21
 
 #include <iostream>
@@ -1597,7 +1598,7 @@ int scatter(float* parameter_Detector, float* parameter_Image, float* parameter_
 	cudaMallocHost(&h_PE_SysMat, sizeof(float) * numProjectionSingle * numImagebin);
 	memcpy(h_PE_SysMat, PE_SysMat, sizeof(float) * numProjectionSingle * numImagebin);
 
-	// 分配设备内存
+	
 	float* deviceMatrix;
 	cudaMalloc(&deviceMatrix, sizeof(float) * numProjectionSingle * numImagebin);
 	cudaMemset(deviceMatrix, 0, sizeof(float) * numProjectionSingle * numImagebin);
