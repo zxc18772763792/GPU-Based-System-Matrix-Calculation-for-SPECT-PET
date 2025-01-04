@@ -1,5 +1,6 @@
-// 使用GPU生成PE系统矩阵
-// �޸�ʱ��2024/11/24
+// GPU based photon-electric system matrix generation
+// author: xingchun zheng @ tsinghua university
+// last modified:2024/11/24
 
 #include <iostream>
 #define _USE_MATH_DEFINES
@@ -946,7 +947,7 @@ __device__ float length_ellipticalcylinder_ray(float x_in, float y_in, float z_i
 }
 
 
-// ����ú���������GPU��CPU������
+
 __global__ void photodetectorCudaMe(float* dst,
 	float* deviceparameter_Collimator,
 	float* deviceparameter_Detector,
@@ -956,7 +957,7 @@ __global__ void photodetectorCudaMe(float* dst,
 
 {
 
-	//解析参数
+	
 	float _float_numCollimatorLayer = deviceparameter_Collimator[0];
 	float _float_numDetectorBins = deviceparameter_Detector[0];
 	
@@ -964,7 +965,7 @@ __global__ void photodetectorCudaMe(float* dst,
 	int numDetectorbins = (int)floor(_float_numDetectorBins + 0.000001f);
 
 	float _float_FOV2Collimator = deviceparameter_Image[11];
-	// 准直器参数
+	// collimator parameters
 
 
 
@@ -1012,10 +1013,6 @@ __global__ void photodetectorCudaMe(float* dst,
 	int numImageVoxelZ = (int)floor(_float_numImageVoxelZ);
 
 
-
-	//线程块编号 blockDim, 线程编号threadIdx
-	//检验该线程是否在分配范围内
-
 	int row = blockIdx.x * blockDim.x + threadIdx.x;
 	if (row < 0 || row > numProjectionSingle - 1) { return; }
 	int col = blockIdx.y * blockDim.y + threadIdx.y;
@@ -1027,18 +1024,16 @@ __global__ void photodetectorCudaMe(float* dst,
 	//DRF
 	int dstIndex = row * numImagebin + col;
 
-	//定义探测器二维索引(zxy)
+
 	unsigned int idxDetector = row;
 
 
-
-	//定义像素二维索引
 	int idxImageVoxelZ = col / (numImageVoxelY * numImageVoxelX);
 	col = col % (numImageVoxelY * numImageVoxelX);
 	int idxImageVoxelY = col / numImageVoxelX;
 	int idxImageVoxelX = col % numImageVoxelX;
 
-	//每个探测器划分为8*8*16个探测单元
+
 	const unsigned int divideX = 8, divideY = 16, divideZ = 8;
 
 
@@ -1239,7 +1234,7 @@ __global__ void photodetectorCudaMe(float* dst,
 					/////////////////////////////////  Attenuation ////////////////////////////////
 					float attenuation_dist = 0.000f;
 
-					// ����Ƿ����й��߶��Ǵӱ���崰���ν��룻���ǴӴ������ľ���Ϊ������
+					
 					float testlength = 999.0f;
 					float x1_box, y1_box, z1_box, x2_box, y2_box, z2_box;
 					for (unsigned int m = 0; m < numCollimatorLayer; m++)
@@ -1407,8 +1402,7 @@ int PESysMatGen(float* parameter_Collimator, float* parameter_Detector, float* p
 	cudaMalloc(&deviceparameter_Image, sizeof(float) * 100);
 	cudaMemcpy(deviceparameter_Image, parameter_Image, sizeof(float) * 100, cudaMemcpyHostToDevice);
 
-	/*每个网格（Grid）可以最多创建65535个线程块，每个线程块（Block）一般最多可以创建512个并行线程*/
-	//取16*32线程块
+
 	dim3 blockSize(16, 32);
 	dim3 gridSize((numProjectionSingle + 15) / blockSize.x, (numImagebin + 31) / blockSize.y);
 	cout << "########################" << endl;
