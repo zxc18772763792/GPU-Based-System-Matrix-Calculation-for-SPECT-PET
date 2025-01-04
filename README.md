@@ -12,5 +12,8 @@ Run the programe PESysMatGen as:
 Complie the ScatterGen_RayTracing_CircularHole folder, you can refer to the compile command as ./ScatterGen_RayTracing_CircularHole/bd.
 Run the programe ScatterGen_CircularHole as:
 ```
-./ScatterGen_CircularHole -GeoCrystal "./Geom -cuda 0
+   ./ScatterGen -PE <path_to_PE_SystemMatrix> 
+                -GeoCrystal <path_to_CrystalGeometryRelationship>
+                -GeoCollimator <path_to_CollimatorGeometryRelationship>
+                -cuda <cuda_device_id>
 ```
