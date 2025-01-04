@@ -7,7 +7,7 @@
 // Usage:
 //   ./PE_SysMat_Gen -cuda <cuda_device_id>
 //
-// Author: Xingchun Zheng
+// Author: Xingchun Zheng @ tsinghua university
 // Last Modified: 2024/12/22
 // Version: 1.0
 
