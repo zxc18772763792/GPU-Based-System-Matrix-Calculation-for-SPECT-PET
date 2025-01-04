@@ -6,7 +6,7 @@
 //   It should be executed after the PE (photoelectric effect) system matrix generation.
 //
 // Usage:
-//   ./ScatterGen -PE <path_to_PE_SystemMatrix> 
+//   ./ScatterGen_CircularHole -PE <path_to_PE_SystemMatrix> 
 //                -GeoCrystal <path_to_CrystalGeometryRelationship>
 //                -GeoCollimator <path_to_CollimatorGeometryRelationship>
 //                -cuda <cuda_device_id>
