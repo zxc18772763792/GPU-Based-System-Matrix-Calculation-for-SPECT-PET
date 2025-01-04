@@ -208,10 +208,11 @@ This program has been tested with a self-collimating SPECT system, and the analy
 
 Thank you for using this tool. Contributions and feedback are welcome to help improve its functionality and performance.
 
+
 ## License
 
-*Specify the license under which your project is distributed, e.g., MIT, GPL, etc.*
+This project is licensed under the [MIT License](LICENSE).
+
 
 ---
 
-*Feel free to customize this README further to better fit your project's specific needs and to include any additional sections or information as necessary.*
