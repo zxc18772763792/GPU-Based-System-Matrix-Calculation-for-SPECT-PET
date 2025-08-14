@@ -197,7 +197,7 @@ Defines the physics parameters for the simulation.
 
 ## Contact
 
-This program has been tested with a self-collimating SPECT system, and the analytical system matrix matches perfectly with experimental results. Calculating the photon-electric system matrix for a 160x160 2D FOV with 5,632 crystals on an RTX 6000 Ada GPU takes approximately **3 minutes**, while calculating the primary Compton scatter system matrix takes about **60 minutes**.
+This program has been tested with an advanced SPECT system, and the analytical system matrix matches perfectly with experimental results. Calculating the photon-electric system matrix for a 200x200 2D FOV with ~6000 crystals on an RTX 6000 Ada GPU takes approximately **3 minutes**, while calculating the primary Compton scatter system matrix takes about **60 minutes**.
 
 **Note:** There are some hard-coded elements in the current version. I apologize for any inconvenience and plan to address these issues when time permits. If you have any questions or need assistance, feel free to reach out.
 
@@ -209,9 +209,17 @@ This program has been tested with a self-collimating SPECT system, and the analy
 Thank you for using this tool. Contributions and feedback are welcome to help improve its functionality and performance.
 
 
+## Usage Terms
+
+This software is available **strictly for academic, research, and educational purposes only**. Commercial use is expressly prohibited without prior written permission. 
+
+When using this work in academic publications or research, you must include proper attribution:
+
+> [Your Name], "GPU-Based System Matrix Calculation for SPECT/PET", GitHub repository, 2023. https://github.com/zxc18772763792/GPU-Based-System-Matrix-Calculation-for-SPECT-PET
+
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+This work is licensed under the [Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License](http://creativecommons.org/licenses/by-nc-sa/4.0/).
 
 
 ---
