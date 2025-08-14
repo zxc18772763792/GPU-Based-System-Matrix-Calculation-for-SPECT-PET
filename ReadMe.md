@@ -215,7 +215,7 @@ This software is available **strictly for academic, research, and educational pu
 
 When using this work in academic publications or research, you must include proper attribution:
 
-> [Your Name], "GPU-Based System Matrix Calculation for SPECT/PET", GitHub repository, 2023. https://github.com/zxc18772763792/GPU-Based-System-Matrix-Calculation-for-SPECT-PET
+> [Xingchun Zheng, etc.], "GPU-Based System Matrix Calculation for SPECT/PET", GitHub repository, 2023. https://github.com/zxc18772763792/GPU-Based-System-Matrix-Calculation-for-SPECT-PET
 
 ## License
 
