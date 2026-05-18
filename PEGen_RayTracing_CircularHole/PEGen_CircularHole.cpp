@@ -16,12 +16,36 @@
 #include <iostream>
 #include <cstring>
 #include <string> 
+#include <vector>
+#include <thread>
+#include <algorithm>
  
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
  
 #include "PESysMatGen.h"
 using namespace std;
+
+static void appendCudaIds(const char* text, vector<int>& cuda_ids)
+{
+	string item;
+	for (const char* p = text; ; ++p)
+	{
+		if (*p == ',' || *p == '\0')
+		{
+			if (!item.empty())
+			{
+				cuda_ids.push_back(atoi(item.c_str()));
+				item.clear();
+			}
+			if (*p == '\0') break;
+		}
+		else
+		{
+			item.push_back(*p);
+		}
+	}
+}
  
 int main(int argc, char* argv[])
 {
@@ -69,27 +93,28 @@ int main(int argc, char* argv[])
  
 	cout << "FOV center to 1st Collimator = " << FOV2Collimator0 << endl;
 	////////////////////////////////////////////////////
-	int cuda_id = 0; 
+	vector<int> cuda_ids;
  
 	for (int i = 1; i < argc; ++i)
 	{
 		if (strcmp(argv[i], "-cuda") == 0 && i + 1 < argc)
 		{
-			cuda_id = atoi(argv[i + 1]);
+			appendCudaIds(argv[i + 1], cuda_ids);
 			i++;
 		}
 		else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0)
 		{
-			cout << "Usage: " << argv[0] << " [-cuda GPU_ID]" << endl;
+			cout << "Usage: " << argv[0] << " [-cuda GPU_ID[,GPU_ID...]]" << endl;
 			return 0;
 		}
 		else
 		{
 			cerr << "Unknown parameter or missing argument: " << argv[i] << endl;
-			cout << "Usage: " << argv[0] << " [-cuda GPU_ID] " << endl;
+			cout << "Usage: " << argv[0] << " [-cuda GPU_ID[,GPU_ID...]] " << endl;
 			return EXIT_FAILURE;
 		}
 	}
+	if (cuda_ids.empty()) cuda_ids.push_back(0);
  
 	////////////////////////////////////////////////////
 	size_t numProjectionsingle = (size_t)floor(parameter_Detector[0]+0.001f);
@@ -116,6 +141,7 @@ int main(int argc, char* argv[])
 	
 	printf("FOV dimension : %d %d %d\n", numImageVoxelX, numImageVoxelY, numImageVoxelZ);
 	printf("FOV Voxel Size(mm) : %f %f %f\n", widthImageVoxelX, widthImageVoxelY, widthImageVoxelZ);
+	cout << "Using " << cuda_ids.size() << " GPU worker(s), split by image bins." << endl;
 	for (size_t idxRotation = 0; idxRotation < numRotation; idxRotation++)
 	{
 		cout << "########################" << endl;
@@ -126,10 +152,37 @@ int main(int argc, char* argv[])
 		cout << "Shift FOV in Y = " << shiftFOVY << "mm" << endl;
 		cout << "Shift FOV in Z = " << shiftFOVZ << "mm" << endl;
  
-		parameter_Image[20] = float(idxRotation);
- 
-		int q = PESysMatGen(parameter_Collimator, parameter_Detector, parameter_Image, 
-		                     out + idxRotation * numProjectionSingle * numImagebin, cuda_id);
+		const size_t workerCount = min(cuda_ids.size(), numImagebin);
+		vector<thread> workers;
+		vector<int> results(workerCount, 0);
+		size_t base = numImagebin / workerCount;
+		size_t rem = numImagebin % workerCount;
+		size_t imageBinStart = 0;
+		for (size_t worker = 0; worker < workerCount; ++worker)
+		{
+			size_t imageBinCount = base + (worker < rem ? 1 : 0);
+			int cuda_id = cuda_ids[worker];
+			workers.emplace_back([&, worker, imageBinStart, imageBinCount, cuda_id]() {
+				float localImage[100];
+				memcpy(localImage, parameter_Image, sizeof(float) * 100);
+				localImage[20] = float(idxRotation);
+				results[worker] = PESysMatGen(parameter_Collimator, parameter_Detector, localImage,
+					out + idxRotation * numProjectionSingle * numImagebin, cuda_id,
+					imageBinStart, imageBinCount);
+			});
+			imageBinStart += imageBinCount;
+		}
+		for (auto& workerThread : workers) workerThread.join();
+		for (size_t worker = 0; worker < workerCount; ++worker)
+		{
+			if (results[worker] < 0)
+			{
+				cerr << "GPU worker " << worker << " failed on rotation " << idxRotation << endl;
+				delete[] out;
+				return EXIT_FAILURE;
+			}
+		}
+		int q = results.empty() ? 0 : results[0];
  
 		printf("numImagebin = %d\n", q);
 	}

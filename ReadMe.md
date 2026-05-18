@@ -67,10 +67,21 @@ This project provides a GPU-based framework for calculating system matrices esse
 2. **Run the Photon-Electric System Matrix Generator:**
 
    ```bash
-   ./PESysMatGen -cuda 0
+   ./PEGen_CircularHole -cuda 0
    ```
 
-   Replace `0` with the appropriate CUDA device ID if necessary.
+   Replace `0` with the appropriate CUDA device ID if necessary. To use multiple
+   GPUs at the same time, pass a comma-separated list, for example:
+
+   ```bash
+   ./PEGen_CircularHole -cuda 0,1
+   ```
+
+   Multi-GPU mode splits the image domain by voxel/image-bin ranges. Each GPU
+   computes the same rotation but only for its assigned image pixels, then the
+   host merges the partial columns back into the original system-matrix layout.
+   Scatter kernels also copy only the PE matrix columns needed by each GPU
+   worker, which lowers per-GPU memory use in multi-GPU runs.
 
 ### Calculate Primary Compton System Matrix
 
@@ -90,10 +101,12 @@ This project provides a GPU-based framework for calculating system matrices esse
      -PE <path_to_PE_SystemMatrix> \
      -GeoCrystal <path_to_CrystalGeometryRelationship> \
      -GeoCollimator <path_to_CollimatorGeometryRelationship> \
-     -cuda <cuda_device_id>
+     -cuda <cuda_device_id[,cuda_device_id...]>
    ```
 
-   Replace placeholders with the actual paths and CUDA device ID.
+   Replace placeholders with the actual paths and CUDA device ID(s). For
+   example, `-cuda 0,1,2,3` uses four GPUs and splits the image-domain pixels
+   across them.
 
 ### (Optional) Calculate Inter-Crystal Primary Compton System Matrix
 
@@ -112,7 +125,7 @@ This project provides a GPU-based framework for calculating system matrices esse
    ./ScatterGen_Crystal \
      -PE <path_to_PE_SystemMatrix> \
      -GeoCrystal <path_to_CrystalGeometryRelationship> \
-     -cuda <cuda_device_id>
+     -cuda <cuda_device_id[,cuda_device_id...]>
    ```
 
 ## Parameter Files
@@ -223,4 +236,3 @@ This work is licensed under the [Creative Commons Attribution-NonCommercial-Shar
 
 
 ---
-

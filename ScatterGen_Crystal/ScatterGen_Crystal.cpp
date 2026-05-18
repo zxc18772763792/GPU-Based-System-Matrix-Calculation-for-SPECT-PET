@@ -18,6 +18,9 @@
 #include <math.h>
 #include <time.h>   
 #include <iostream>
+#include <vector>
+#include <thread>
+#include <algorithm>
 
 #include<cuda_runtime.h>
 #include <device_launch_parameters.h>
@@ -25,6 +28,27 @@
 #include "scatter.h"
 
 using namespace std;
+
+static void appendCudaIds(const char* text, vector<int>& cuda_ids)
+{
+	string item;
+	for (const char* p = text; ; ++p)
+	{
+		if (*p == ',' || *p == '\0')
+		{
+			if (!item.empty())
+			{
+				cuda_ids.push_back(atoi(item.c_str()));
+				item.clear();
+			}
+			if (*p == '\0') break;
+		}
+		else
+		{
+			item.push_back(*p);
+		}
+	}
+}
 
 int main(int argc, char* argv[])
 {
@@ -85,13 +109,14 @@ int main(int argc, char* argv[])
 	float shiftFOVY = parameter_Image[9];
 	float shiftFOVZ = parameter_Image[10];
 
-	const int numProjectionSingle = numProjectionsingle;
-	const int numImagebin = numImageVoxelX * numImageVoxelY * numImageVoxelZ;
-	const int numRotation = numRotation_;
+	const size_t numProjectionSingle = (size_t)numProjectionsingle;
+	const size_t numImagebin = (size_t)numImageVoxelX * numImageVoxelY * numImageVoxelZ;
+	const size_t numRotation = (size_t)numRotation_;
+	const size_t totalElements = numProjectionSingle * numImagebin * numRotation;
 
 	string FnamePE;
 	string FnameGeo = "GeometryRelationShip_Crystal2Crystal"; 
-	int cuda_id = 0; 
+	vector<int> cuda_ids;
 
 	for (int i = 1; i < argc; ++i)
 	{
@@ -108,12 +133,12 @@ int main(int argc, char* argv[])
 		}
 		else if (strcmp(argv[i], "-cuda") == 0 && i + 1 < argc)
 		{
-			cuda_id = atoi(argv[i + 1]);
+			appendCudaIds(argv[i + 1], cuda_ids);
 			i++;
 		}
 		else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0)
 		{
-			cout << "Usage: " << argv[0] << " [-PE PE_SysMat_path] [-GeoCrystal GeometryRelationShip_Crystal2Crystal_path] [-cuda GPU_ID]" << endl;
+			cout << "Usage: " << argv[0] << " [-PE PE_SysMat_path] [-GeoCrystal GeometryRelationShip_Crystal2Crystal_path] [-cuda GPU_ID[,GPU_ID...]]" << endl;
 			return 0;
 		}
 		else
@@ -123,8 +148,9 @@ int main(int argc, char* argv[])
 			return EXIT_FAILURE;
 		}
 	}
+	if (cuda_ids.empty()) cuda_ids.push_back(0);
 
-	float* PE_SysMat = new float[numProjectionSingle * numImagebin * numRotation]();
+	float* PE_SysMat = new float[totalElements]();
 
 	if (FnamePE.empty())
 	{
@@ -139,7 +165,7 @@ int main(int argc, char* argv[])
 	FILE* fp0;
 	fp0 = fopen(FnamePE.c_str(), "rb");
 	if (fp0 == 0) { puts("error"); exit(0); }
-	fread(PE_SysMat, sizeof(float), numProjectionSingle * numImagebin * numRotation, fp0);
+	fread(PE_SysMat, sizeof(float), totalElements, fp0);
 	fclose(fp0);
 	auto end_ioPE = std::chrono::high_resolution_clock::now();
 	auto duration_ioPE = std::chrono::duration_cast<std::chrono::milliseconds>(end_ioPE - start_ioPE);
@@ -152,11 +178,12 @@ int main(int argc, char* argv[])
 	auto start_scatter = std::chrono::high_resolution_clock::now();
 
 
-	float* out = new float[numProjectionSingle * numImagebin * numRotation]();
+	float* out = new float[totalElements]();
 
 	printf("FOV dimension : %d %d %d\n", numImageVoxelX, numImageVoxelY, numImageVoxelZ);
 	printf("FOV Voxel Size(mm) : %f %f %f\n", widthImageVoxelX, widthImageVoxelY, widthImageVoxelZ);
-	for (int idxRotation = 0; idxRotation < numRotation; idxRotation++)
+	cout << "Using " << cuda_ids.size() << " GPU worker(s), split by image bins." << endl;
+	for (size_t idxRotation = 0; idxRotation < numRotation; idxRotation++)
 	{
 		cout << "########################" << endl;
 		cout << "Rotation (" << idxRotation << ") processing ..." << endl;
@@ -167,9 +194,43 @@ int main(int argc, char* argv[])
 		cout << "Shift FOV in Y = " << shiftFOVY << "mm" << endl;
 		cout << "Shift FOV in Z = " << shiftFOVZ << "mm" << endl;
 
-		parameter_Image[20] = float(idxRotation);
-
-		int q = scatter(parameter_Detector, parameter_Image, parameter_Physics, PE_SysMat, FnameGeo.c_str(), out + idxRotation * numProjectionSingle * numImagebin, cuda_id);
+		const bool generatingGeometry = ((int)floor(parameter_Physics[8]) == 1);
+		const size_t workerCount = generatingGeometry ? 1 : min(cuda_ids.size(), (size_t)numImagebin);
+		vector<thread> workers;
+		vector<int> results(workerCount, 0);
+		size_t base = (size_t)numImagebin / workerCount;
+		size_t rem = (size_t)numImagebin % workerCount;
+		size_t imageBinStart = 0;
+		for (size_t worker = 0; worker < workerCount; ++worker)
+		{
+			size_t imageBinCount = base + (worker < rem ? 1 : 0);
+			int cuda_id = cuda_ids[worker];
+			workers.emplace_back([&, worker, imageBinStart, imageBinCount, cuda_id]() {
+				float localImage[100];
+				float localPhysics[100];
+				memcpy(localImage, parameter_Image, sizeof(float) * 100);
+				memcpy(localPhysics, parameter_Physics, sizeof(float) * 100);
+				localImage[20] = float(idxRotation);
+				results[worker] = scatter(parameter_Detector, localImage, localPhysics,
+					PE_SysMat + idxRotation * numProjectionSingle * numImagebin,
+					FnameGeo.c_str(), out + idxRotation * numProjectionSingle * numImagebin,
+					cuda_id, imageBinStart, imageBinCount);
+			});
+			imageBinStart += imageBinCount;
+		}
+		for (auto& workerThread : workers) workerThread.join();
+		if (generatingGeometry) parameter_Physics[8] = 0;
+		for (size_t worker = 0; worker < workerCount; ++worker)
+		{
+			if (results[worker] < 0)
+			{
+				cerr << "GPU worker " << worker << " failed on rotation " << idxRotation << endl;
+				delete[] out;
+				delete[] PE_SysMat;
+				return EXIT_FAILURE;
+			}
+		}
+		int q = results.empty() ? 0 : results[0];
 
 		printf("numImagebin = %d\n", q);
 	}
@@ -185,7 +246,7 @@ int main(int argc, char* argv[])
 	FILE* fp1;
 	fp1 = fopen(Fname, "wb+");
 	if (fp1 == 0) { puts("error"); exit(0); }
-	fwrite(out, sizeof(float), numProjectionSingle * numImagebin * numRotation, fp1);
+		fwrite(out, sizeof(float), totalElements, fp1);
 	fclose(fp1);
 
 	cout << "########################" << endl;
@@ -194,8 +255,8 @@ int main(int argc, char* argv[])
 
 	if (parameter_Physics[3] == 1) 
 	{
-		float* SysMat = new float[numProjectionSingle * numImagebin * numRotation]();
-		for (int i = 0; i < numProjectionSingle * numImagebin * numRotation; i++) 
+		float* SysMat = new float[totalElements]();
+		for (size_t i = 0; i < totalElements; i++) 
 		{
 			SysMat[i] = PE_SysMat[i] + out[i];
 		}
@@ -205,7 +266,7 @@ int main(int argc, char* argv[])
 		FILE* fp2;
 		fp2 = fopen(Fname3, "wb+");
 		if (fp2 == 0) { puts("error"); exit(0); }
-		fwrite(SysMat, sizeof(float), numProjectionSingle * numImagebin * numRotation, fp2);
+		fwrite(SysMat, sizeof(float), totalElements, fp2);
 		fclose(fp2);
 
 		cout << "########################" << endl;

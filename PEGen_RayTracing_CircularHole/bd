@@ -2,6 +2,6 @@ export PATH="/usr/local/cuda-12.6/bin":$PATH
 export LD_LIBRARY_PATH="/usr/local/cuda-12.6/lib64":$LD_LIBRARY_PATH
 export LIBRARY_PATH="/usr/local/cuda-12.6/lib64":$LIBRARY_PATH
 
-nvcc -c PESysMatGen.cu
-nvcc -c PEGen_CircularHole.cpp
-g++ -o PEGen_CircularHole PESysMatGen.o PEGen_CircularHole.o -lcudart -L/usr/local/cuda-12.6
+nvcc -std=c++11 -c PESysMatGen.cu
+nvcc -std=c++11 -c PEGen_CircularHole.cpp
+g++ -std=c++11 -pthread -o PEGen_CircularHole PESysMatGen.o PEGen_CircularHole.o -lcudart -L/usr/local/cuda-12.6

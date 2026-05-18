@@ -1,6 +1,6 @@
 export PATH="/usr/local/cuda-12.6/bin":$PATH
 export LD_LIBRARY_PATH="/usr/local/cuda-12.6/lib64":$LD_LIBRARY_PATH
 export LIBRARY_PATH="/usr/local/cuda-12.6/lib64":$LIBRARY_PATH
-nvcc -c  scatter.cu
-nvcc -c  ScatterGen_Crystal.cpp
-g++ -o ScatterGen_Crystal scatter.o ScatterGen_Crystal.o -lcudart -L/usr/local/cuda-12.6
+nvcc -std=c++11 -c  scatter.cu
+nvcc -std=c++11 -c  ScatterGen_Crystal.cpp
+g++ -std=c++11 -pthread -o ScatterGen_Crystal scatter.o ScatterGen_Crystal.o -lcudart -L/usr/local/cuda-12.6

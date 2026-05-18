@@ -21,6 +21,7 @@
 #include "PESysMatGen.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 
@@ -374,13 +375,16 @@ __global__ void photodetectorCudaMe(
     int grid_nx, int grid_nz,
     int grid_mpc,
     long long numProjSingle,
-    long long numImagebin)
+    long long numImagebin,
+    long long imageBinStart,
+    long long imageBinCount)
 {
     long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= numProjSingle * numImagebin) return;
+    if (tid >= numProjSingle * imageBinCount) return;
 
-    int row = (int)(tid / numImagebin);
-    int col = (int)(tid % numImagebin);
+    int row = (int)(tid / imageBinCount);
+    int localCol = (int)(tid % imageBinCount);
+    int col = (int)(imageBinStart + localCol);
 
     // ---- Image params ----
     int nX = (int)devImg[0], nY = (int)devImg[1], nZ = (int)devImg[2];
@@ -639,7 +643,7 @@ __global__ void photodetectorCudaMe(
         }
     }
 
-    dst[tid] = final_val;
+    dst[row * imageBinCount + localCol] = final_val;
 }
 
 
@@ -647,7 +651,8 @@ __global__ void photodetectorCudaMe(
 // Host: build spatial hash + launch
 // ============================================================================
 int PESysMatGen(float* parameter_Collimator, float* parameter_Detector,
-                float* parameter_Image, float* dst, int cuda_id)
+                float* parameter_Image, float* dst, int cuda_id,
+                size_t imageBinStart, size_t imageBinCount)
 {
     cout << "Get into PESysMatGen (Optimized v3 — fixed maxLateral)" << endl;
 
@@ -657,6 +662,13 @@ int PESysMatGen(float* parameter_Collimator, float* parameter_Detector,
 
     size_t numProjSingle = (size_t)floorf(parameter_Detector[0] + 0.0001f);
     size_t numImagebin = (size_t)nVX * (size_t)nVY * (size_t)nVZ;
+    if (imageBinStart > numImagebin) {
+        cerr << "imageBinStart is larger than numImagebin" << endl;
+        return -1;
+    }
+    if (imageBinCount == 0 || imageBinStart + imageBinCount > numImagebin) {
+        imageBinCount = numImagebin - imageBinStart;
+    }
 
     int deviceCount;
     cudaGetDeviceCount(&deviceCount);
@@ -712,7 +724,7 @@ int PESysMatGen(float* parameter_Collimator, float* parameter_Detector,
     }
 
     // ---- GPU alloc ----
-    size_t matBytes = sizeof(float) * numProjSingle * numImagebin;
+    size_t matBytes = sizeof(float) * numProjSingle * imageBinCount;
     float *devMat, *devCol, *devDet, *devImg;
     int *d_gIdx, *d_gCnt;
 
@@ -729,18 +741,20 @@ int PESysMatGen(float* parameter_Collimator, float* parameter_Detector,
     cudaMalloc(&d_gCnt, sizeof(int)*gridSize);
     cudaMemcpy(d_gCnt, hCnt, sizeof(int)*gridSize, cudaMemcpyHostToDevice);
 
-    long long total = (long long)numProjSingle * (long long)numImagebin;
+    long long total = (long long)numProjSingle * (long long)imageBinCount;
     int tpb = 256;
     long long nBlk = (total + tpb - 1) / tpb;
     if (nBlk > 2147483647LL) { cerr << "Grid overflow" << endl; return -1; }
 
-    printf("Launch: %lld threads\n", total);
+    printf("Launch: %lld threads for image bins [%zu, %zu)\n",
+           total, imageBinStart, imageBinStart + imageBinCount);
 
     photodetectorCudaMe<<<(int)nBlk, tpb>>>(
         devMat, devCol, devDet, devImg,
         d_gIdx, d_gCnt,
         originX, originZ, cellSize, gridNX, gridNZ, maxPerCell,
-        (long long)numProjSingle, (long long)numImagebin);
+        (long long)numProjSingle, (long long)numImagebin,
+        (long long)imageBinStart, (long long)imageBinCount);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) { cerr << "Launch: " << cudaGetErrorString(err) << endl; return -1; }
@@ -748,7 +762,14 @@ int PESysMatGen(float* parameter_Collimator, float* parameter_Detector,
     err = cudaGetLastError();
     if (err != cudaSuccess) { cerr << "Exec: " << cudaGetErrorString(err) << endl; return -1; }
 
-    cudaMemcpy(dst, devMat, matBytes, cudaMemcpyDeviceToHost);
+    float* hostPartial = new float[numProjSingle * imageBinCount];
+    cudaMemcpy(hostPartial, devMat, matBytes, cudaMemcpyDeviceToHost);
+    for (size_t row = 0; row < numProjSingle; ++row) {
+        memcpy(dst + row * numImagebin + imageBinStart,
+               hostPartial + row * imageBinCount,
+               sizeof(float) * imageBinCount);
+    }
+    delete[] hostPartial;
     cudaFree(devCol); cudaFree(devDet); cudaFree(devImg);
     cudaFree(devMat); cudaFree(d_gIdx); cudaFree(d_gCnt);
     delete[] hIdx; delete[] hCnt;

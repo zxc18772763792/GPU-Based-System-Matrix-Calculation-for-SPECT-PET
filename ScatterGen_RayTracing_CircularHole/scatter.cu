@@ -8,6 +8,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include<cuda_runtime.h>
 #include <device_launch_parameters.h>
 #include <vector>
@@ -1081,7 +1082,9 @@ __global__ void crystalScatterSysMatCuda(float* dst,
 	float* devicePESysMat,
 	unsigned int* deviceGeometryRelationShip_Crystal2Crystal,
 	int numProjectionSingle,
-	int numImagebin)
+	int numImagebin,
+	int imageBinStart,
+	int imageBinCount)
 
 {
 	// Calculate the primary compton scatter between crystals
@@ -1115,12 +1118,13 @@ __global__ void crystalScatterSysMatCuda(float* dst,
 
 	long long int row = blockIdx.x * blockDim.x + threadIdx.x;
 	if (row < 0 || row > numProjectionSingle - 1) { return; }
-	long long int col = blockIdx.y * blockDim.y + threadIdx.y;
-	if (col < 0 || col > numImagebin - 1) { return; }
+	long long int localCol = blockIdx.y * blockDim.y + threadIdx.y;
+	if (localCol < 0 || localCol > imageBinCount - 1) { return; }
+	long long int col = imageBinStart + localCol;
 	long long int slice = blockIdx.z * blockDim.z + threadIdx.z;
 	if (slice < 0 || slice > numProjectionSingle - 1) { return; }
 
-	long long int dstIndex = row * numImagebin + col;
+	long long int dstIndex = row * imageBinCount + localCol;
 
 	unsigned int idxDetector = row; // index of detector
 	unsigned int id_Detector = slice; // index of scatter
@@ -1215,7 +1219,7 @@ __global__ void crystalScatterSysMatCuda(float* dst,
 
 
 	///////////////  Probability of Compton Scatter Happened on scatter crystal id_Detector //////////////////
-	int PESysMat_index = numImagebin * id_Detector + ImageVoxel_index;
+	long long PESysMat_index = (long long)id_Detector * (long long)imageBinCount + localCol;
 	float prob_Compton_othercrystal = devicePESysMat[PESysMat_index] * coeff_detector_compton / coeff_detector_pe;
 
 	float x_scatter = deviceparameter_Detector[id_Detector * 12 + 1];
@@ -1548,7 +1552,9 @@ __global__ void collimatorScatterSysMatCuda(float* dst,
 	float* deviceparameter_Physics,
 	unsigned int* deviceGeometryRelationShip_Collimator2Crystal,
 	int numProjectionSingle,
-	int numImagebin)
+	int numImagebin,
+	int imageBinStart,
+	int imageBinCount)
 
 {
 
@@ -1602,12 +1608,13 @@ __global__ void collimatorScatterSysMatCuda(float* dst,
 	//////////////////////////////////////////////////////////////////////////////////////////////////////////
 	long long int row = blockIdx.x * blockDim.x + threadIdx.x;
 	if (row < 0 || row > numProjectionSingle - 1) { return; }
-	long long int col = blockIdx.y * blockDim.y + threadIdx.y;
-	if (col < 0 || col > numImagebin - 1) { return; }
+	long long int localCol = blockIdx.y * blockDim.y + threadIdx.y;
+	if (localCol < 0 || localCol > imageBinCount - 1) { return; }
+	long long int col = imageBinStart + localCol;
 	long long int slice = blockIdx.z * blockDim.z + threadIdx.z;
 	if (slice < 0 || slice > numCollimator_Holes - 1) { return; }
 
-	long long int dstIndex = row * numImagebin + col;
+	long long int dstIndex = row * imageBinCount + localCol;
 
 	/*
 	if (row < 5 && col < 5 && slice < 1) {
@@ -2010,7 +2017,7 @@ __global__ void geometryRelationShip_Collimator2Crystal(unsigned int* dst_relati
 
 
 
-int scatter(float* parameter_Collimator, float* parameter_Detector, float* parameter_Image, float* parameter_Physics,float* PE_SysMat,const char* FnameGeoCrystal, const char* FnameGeoCollimator, float* dst, int cuda_id)
+int scatter(float* parameter_Collimator, float* parameter_Detector, float* parameter_Image, float* parameter_Physics,float* PE_SysMat,const char* FnameGeoCrystal, const char* FnameGeoCollimator, float* dst, int cuda_id, size_t imageBinStart, size_t imageBinCount)
 {
 
 	cout << "Get into scatter function" << endl;
@@ -2021,8 +2028,13 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 
 	int numProjectionSingle = (int)floor(parameter_Detector[0]+0.0001f);
 	int numImagebin = numPSFImageVoxelX * numPSFImageVoxelY * numPSFImageVoxelZ;
-	int numRotation = (int)floor(parameter_Image[6] + 0.001f);
-	
+	if (imageBinStart > (size_t)numImagebin) {
+		cerr << "imageBinStart is larger than numImagebin" << endl;
+		return -1;
+	}
+	if (imageBinCount == 0 || imageBinStart + imageBinCount > (size_t)numImagebin) {
+		imageBinCount = (size_t)numImagebin - imageBinStart;
+	}
 	int deviceCount;
 	cudaGetDeviceCount(&deviceCount);
 	int device;
@@ -2080,21 +2092,25 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 	memcpy(h_parameter_Physics, parameter_Physics, sizeof(float) * 100);
 
 	float* h_PE_SysMat;
-	cudaMallocHost(&h_PE_SysMat, sizeof(float) * numProjectionSingle * numImagebin);
-	memcpy(h_PE_SysMat, PE_SysMat, sizeof(float) * numProjectionSingle * numImagebin);
+	cudaMallocHost(&h_PE_SysMat, sizeof(float) * numProjectionSingle * imageBinCount);
+	for (int row = 0; row < numProjectionSingle; ++row) {
+		memcpy(h_PE_SysMat + row * imageBinCount,
+			PE_SysMat + row * numImagebin + imageBinStart,
+			sizeof(float) * imageBinCount);
+	}
 
 	// Allocate memory on device
 	float* deviceMatrix_crystal;
-	cudaMalloc(&deviceMatrix_crystal, sizeof(float) * numProjectionSingle * numImagebin);
-	cudaMemset(deviceMatrix_crystal, 0, sizeof(float) * numProjectionSingle * numImagebin);
+	cudaMalloc(&deviceMatrix_crystal, sizeof(float) * numProjectionSingle * imageBinCount);
+	cudaMemset(deviceMatrix_crystal, 0, sizeof(float) * numProjectionSingle * imageBinCount);
 
 	float* deviceMatrix_collimator;
-	cudaMalloc(&deviceMatrix_collimator, sizeof(float) * numProjectionSingle * numImagebin);
-	cudaMemset(deviceMatrix_collimator, 0, sizeof(float) * numProjectionSingle * numImagebin);
+	cudaMalloc(&deviceMatrix_collimator, sizeof(float) * numProjectionSingle * imageBinCount);
+	cudaMemset(deviceMatrix_collimator, 0, sizeof(float) * numProjectionSingle * imageBinCount);
 
 	float* devicePEMatrix;
-	cudaMalloc(&devicePEMatrix, sizeof(float) * numProjectionSingle * numImagebin);
-	cudaMemcpyAsync(devicePEMatrix, h_PE_SysMat, sizeof(float) * numProjectionSingle * numImagebin, cudaMemcpyHostToDevice, stream);
+	cudaMalloc(&devicePEMatrix, sizeof(float) * numProjectionSingle * imageBinCount);
+	cudaMemcpyAsync(devicePEMatrix, h_PE_SysMat, sizeof(float) * numProjectionSingle * imageBinCount, cudaMemcpyHostToDevice, stream);
 
 	float* deviceparameter_Collimator;
 	cudaMalloc(&deviceparameter_Collimator, sizeof(float) * 80000);
@@ -2169,13 +2185,14 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 	dim3 blockSize(16, 16, 1); 
 	dim3 gridSize(
 		(numProjectionSingle + 15) / 16, 
-		(numImagebin + 15) / 16,         
+		(imageBinCount + 15) / 16,         
 		(numProjectionSingle + 0) / 1
 	);
 
 	cout << "########################" << endl;
 	cout << "numProjectionSingle = " << numProjectionSingle << endl;
 	cout << "numImagebin = " << numImagebin << endl;
+	cout << "imageBin range = [" << imageBinStart << ", " << imageBinStart + imageBinCount << ")" << endl;
 	cout << "gridSize.x = " << gridSize.x << endl;
 	cout << "gridSize.y = " << gridSize.y << endl;
 	cout << "gridSize.z = " << gridSize.z << endl;
@@ -2191,11 +2208,13 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 		devicePEMatrix,
 		deviceGeometryRelationShip_Crystal2Crystal,
 		numProjectionSingle,
-		numImagebin);
+		numImagebin,
+		(int)imageBinStart,
+		(int)imageBinCount);
 	
 	float* h_Crystal_SysMat;
-	cudaMallocHost(&h_Crystal_SysMat, sizeof(float) * numProjectionSingle * numImagebin);
-	cudaMemcpyAsync(h_Crystal_SysMat, deviceMatrix_crystal, sizeof(float) * numProjectionSingle * numImagebin, cudaMemcpyDeviceToHost, stream);
+	cudaMallocHost(&h_Crystal_SysMat, sizeof(float) * numProjectionSingle * imageBinCount);
+	cudaMemcpyAsync(h_Crystal_SysMat, deviceMatrix_crystal, sizeof(float) * numProjectionSingle * imageBinCount, cudaMemcpyDeviceToHost, stream);
 	cudaCheckError(cudaGetLastError());
 	cudaStreamSynchronize(stream);
 	
@@ -2303,13 +2322,14 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 	dim3 blockSize_collimator(16, 16, 1);
 	dim3 gridSize_collimator(
 		(numProjectionSingle + 15) / 16,
-		(numImagebin + 15) / 16,
+		(imageBinCount + 15) / 16,
 		(numCollimator_Holes + 0) / 1
 	);
 
 	cout << "########################" << endl;
 	cout << "numProjectionSingle = " << numProjectionSingle << endl;
 	cout << "numImagebin = " << numImagebin << endl;
+	cout << "imageBin range = [" << imageBinStart << ", " << imageBinStart + imageBinCount << ")" << endl;
 	cout << "gridSize.x = " << gridSize_collimator.x << endl;
 	cout << "gridSize.y = " << gridSize_collimator.y << endl;
 	cout << "gridSize.z = " << gridSize_collimator.z << endl;
@@ -2326,15 +2346,17 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 		deviceparameter_Physics,
 		deviceGeometryRelationShip_Collimator2Crystal,
 		numProjectionSingle,
-		numImagebin);
+		numImagebin,
+		(int)imageBinStart,
+		(int)imageBinCount);
 	
 	cudaError_t err = cudaGetLastError();
 	if (err != cudaSuccess) {
 		std::cerr << "Kernel collimatorScatterSysMatCuda launch failed: " << cudaGetErrorString(err) << std::endl;
 	}
 	float* h_Collimator_SysMat;
-	cudaMallocHost(&h_Collimator_SysMat, sizeof(float) * numProjectionSingle * numImagebin);
-	cudaMemcpyAsync(h_Collimator_SysMat, deviceMatrix_collimator, sizeof(float) * numProjectionSingle * numImagebin, cudaMemcpyDeviceToHost, stream);
+	cudaMallocHost(&h_Collimator_SysMat, sizeof(float) * numProjectionSingle * imageBinCount);
+	cudaMemcpyAsync(h_Collimator_SysMat, deviceMatrix_collimator, sizeof(float) * numProjectionSingle * imageBinCount, cudaMemcpyDeviceToHost, stream);
 	cudaCheckError(cudaGetLastError());
 	cudaStreamSynchronize(stream);
 	
@@ -2351,9 +2373,14 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 	cout << "Time of  collimatorScatterSysMatCuda function: " << duration_CollimatorScatterSysMatCuda.count() / 1000.0 / 60.0 << " min" << endl;
 
 	cout << "########################" << endl;
-	for (int i = 0; i < numProjectionSingle * numImagebin* numRotation; i++)
+	for (int row = 0; row < numProjectionSingle; ++row)
 	{
-		dst[i] = h_Collimator_SysMat[i] + h_Crystal_SysMat[i];
+		for (size_t localCol = 0; localCol < imageBinCount; ++localCol)
+		{
+			size_t partialIndex = (size_t)row * imageBinCount + localCol;
+			dst[(size_t)row * numImagebin + imageBinStart + localCol] =
+				h_Collimator_SysMat[partialIndex] + h_Crystal_SysMat[partialIndex];
+		}
 	}
 	// Release Sources
 	cudaFreeHost(h_parameter_Collimator);

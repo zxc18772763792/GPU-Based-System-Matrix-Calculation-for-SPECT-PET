@@ -9,6 +9,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include<cuda_runtime.h>
 #include <device_launch_parameters.h>
 #include <vector>
@@ -1060,7 +1061,9 @@ __global__ void collimatorScatterSysMatCuda(float* dst,
 	float* deviceparameter_Physics,
 	unsigned int* deviceGeometryRelationShip_Collimator2Crystal,
 	int numProjectionSingle,
-	int numImagebin)
+	int numImagebin,
+	int imageBinStart,
+	int imageBinCount)
 
 {
 
@@ -1114,12 +1117,13 @@ __global__ void collimatorScatterSysMatCuda(float* dst,
 	//////////////////////////////////////////////////////////////////////////////////////////////////////////
 	long long int row = blockIdx.x * blockDim.x + threadIdx.x;
 	if (row < 0 || row > numProjectionSingle - 1) { return; }
-	long long int col = blockIdx.y * blockDim.y + threadIdx.y;
-	if (col < 0 || col > numImagebin - 1) { return; }
+	long long int localCol = blockIdx.y * blockDim.y + threadIdx.y;
+	if (localCol < 0 || localCol > imageBinCount - 1) { return; }
+	long long int col = imageBinStart + localCol;
 	long long int slice = blockIdx.z * blockDim.z + threadIdx.z;
 	if (slice < 0 || slice > numCollimator_Holes - 1) { return; }
 
-	long long int dstIndex = row * numImagebin + col;
+	long long int dstIndex = row * imageBinCount + localCol;
 
 	unsigned int idxDetector = row; // index of detector
 	unsigned int id_CollimatorHole = slice; // index of scatter
@@ -1508,7 +1512,7 @@ __global__ void geometryRelationShip_Collimator2Crystal(unsigned int * dst_relat
 }
 
 
-int scatter(float* parameter_Collimator, float* parameter_Detector, float* parameter_Image, float* parameter_Physics,float* PE_SysMat,const char* FnameGeo, float* dst, int cuda_id)
+int scatter(float* parameter_Collimator, float* parameter_Detector, float* parameter_Image, float* parameter_Physics,float* PE_SysMat,const char* FnameGeo, float* dst, int cuda_id, size_t imageBinStart, size_t imageBinCount)
 {
 
 	cout << "Get into scatter function" << endl;
@@ -1523,6 +1527,13 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 	int numProjectionSingle = (int)floor(parameter_Detector[0]+0.0001f);
 	int numImagebin = numPSFImageVoxelX * numPSFImageVoxelY * numPSFImageVoxelZ;
 	int numCollimator_Holes = (int)parameter_Collimator[10];
+	if (imageBinStart > (size_t)numImagebin) {
+		cerr << "imageBinStart is larger than numImagebin" << endl;
+		return -1;
+	}
+	if (imageBinCount == 0 || imageBinStart + imageBinCount > (size_t)numImagebin) {
+		imageBinCount = (size_t)numImagebin - imageBinStart;
+	}
 
 	
 	int deviceCount;
@@ -1582,18 +1593,9 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 	cudaMallocHost(&h_parameter_Physics, sizeof(float) * 100);
 	memcpy(h_parameter_Physics, parameter_Physics, sizeof(float) * 100);
 
-	float* h_PE_SysMat;
-	cudaMallocHost(&h_PE_SysMat, sizeof(float) * numProjectionSingle * numImagebin);
-	memcpy(h_PE_SysMat, PE_SysMat, sizeof(float) * numProjectionSingle * numImagebin);
-
-	
 	float* deviceMatrix;
-	cudaMalloc(&deviceMatrix, sizeof(float) * numProjectionSingle * numImagebin);
-	cudaMemset(deviceMatrix, 0, sizeof(float) * numProjectionSingle * numImagebin);
-
-	float* devicePEMatrix;
-	cudaMalloc(&devicePEMatrix, sizeof(float) * numProjectionSingle * numImagebin);
-	cudaMemcpyAsync(devicePEMatrix, h_PE_SysMat, sizeof(float) * numProjectionSingle * numImagebin, cudaMemcpyHostToDevice, stream);
+	cudaMalloc(&deviceMatrix, sizeof(float) * numProjectionSingle * imageBinCount);
+	cudaMemset(deviceMatrix, 0, sizeof(float) * numProjectionSingle * imageBinCount);
 
 	float* deviceparameter_Collimator;
 	cudaMalloc(&deviceparameter_Collimator, sizeof(float) * 80000);
@@ -1676,13 +1678,14 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 	dim3 blockSize(16, 16, 1); 
 	dim3 gridSize(
 		(numProjectionSingle + 15) / 16, 
-		(numImagebin + 15) / 16,         
+		(imageBinCount + 15) / 16,         
 		(numCollimator_Holes + 0) / 1
 	);
 
 	cout << "########################" << endl;
 	cout << "numProjectionSingle = " << numProjectionSingle << endl;
 	cout << "numImagebin = " << numImagebin << endl;
+	cout << "imageBin range = [" << imageBinStart << ", " << imageBinStart + imageBinCount << ")" << endl;
 	cout << "gridSize.x = " << gridSize.x << endl;
 	cout << "gridSize.y = " << gridSize.y << endl;
 	cout << "gridSize.z = " << gridSize.z << endl;
@@ -1698,7 +1701,9 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 		deviceparameter_Physics,
 		deviceGeometryRelationShip_Collimator2Crystal,
 		numProjectionSingle,
-		numImagebin);
+		numImagebin,
+		(int)imageBinStart,
+		(int)imageBinCount);
 
 	cudaError_t err = cudaGetLastError();
 	if (err != cudaSuccess) {
@@ -1713,13 +1718,20 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 		
 	}
 
-	cudaMemcpyAsync(dst, deviceMatrix, sizeof(float) * numProjectionSingle * numImagebin, cudaMemcpyDeviceToHost, stream);
+	float* hostPartial = new float[numProjectionSingle * imageBinCount];
+	cudaMemcpyAsync(hostPartial, deviceMatrix, sizeof(float) * numProjectionSingle * imageBinCount, cudaMemcpyDeviceToHost, stream);
 	auto end_CollimatorScatterSysMatCuda = std::chrono::high_resolution_clock::now();
 	auto duration_CollimatorScatterSysMatCuda = std::chrono::duration_cast<std::chrono::milliseconds>(end_CollimatorScatterSysMatCuda - start_CollimatorScatterSysMatCuda);
 	cout << "Time of scatterSysMatCuda function: " << duration_CollimatorScatterSysMatCuda.count()/1000.0/60.0 << " min" << endl;
 
 	
 	cudaStreamSynchronize(stream);
+	for (int row = 0; row < numProjectionSingle; ++row) {
+		memcpy(dst + row * numImagebin + imageBinStart,
+			hostPartial + row * imageBinCount,
+			sizeof(float) * imageBinCount);
+	}
+	delete[] hostPartial;
 	cout << "########################" << endl;
 
 
@@ -1728,13 +1740,11 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 	cudaFreeHost(h_parameter_Detector);
 	cudaFreeHost(h_parameter_Image);
 	cudaFreeHost(h_parameter_Physics);
-	cudaFreeHost(h_PE_SysMat);
 	cudaFree(deviceparameter_Collimator);
 	cudaFree(deviceparameter_Detector);
 	cudaFree(deviceparameter_Image);
 	cudaFree(deviceparameter_Physics);
 	cudaFree(deviceMatrix);
-	cudaFree(devicePEMatrix);
 	cudaFree(deviceGeometryRelationShip_Collimator2Crystal);
 
 	delete[] hostGeometryRelationShip_Collimator2Crystal;
