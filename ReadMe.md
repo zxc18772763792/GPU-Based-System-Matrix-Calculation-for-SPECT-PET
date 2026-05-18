@@ -1,238 +1,314 @@
 # GPU-Based System Matrix Calculation for SPECT/PET
 
-A GPU-accelerated system matrix calculation tool designed for SPECT and PET systems, particularly those with complex geometries. This homemade software has been tested and performs efficiently on my systems.
+CUDA tools for generating SPECT/PET system matrices, with support for complex detector and collimator geometries. The project includes photon-electric response generation and primary Compton scatter generation for detector crystals and collimator holes.
 
-## Table of Contents
+The current version supports multi-GPU execution by splitting the image domain into voxel/image-bin ranges. This keeps the output matrix layout unchanged while allowing multiple GPUs to work on the same rotation in parallel.
 
-- [Introduction](#introduction)
-- [Features](#features)
-- [Prerequisites](#prerequisites)
-- [Installation](#installation)
-- [Usage](#usage)
-  - [Calculate Photon-Electric System Matrix](#calculate-photon-electric-system-matrix)
-  - [Calculate Primary Compton System Matrix](#calculate-primary-compton-system-matrix)
-  - [(Optional) Calculate Inter-Crystal Primary Compton System Matrix](#optional-calculate-inter-crystal-primary-compton-system-matrix)
-- [Parameter Files](#parameter-files)
-  - [Param_Collimator.dat](#param_collimatordat)
-  - [Param_Detector.dat](#param_detectordat)
-  - [Param_Image.dat](#param_imagedat)
-  - [Param_Physics.dat](#param_physicsdat)
-- [Contact](#contact)
-- [Acknowledgements](#acknowledgements)
-- [License](#license)
+## Highlights
 
-## Introduction
+- CUDA-accelerated photon-electric system matrix generation.
+- Primary Compton scatter matrix generation for crystal scatter and collimator scatter.
+- Ray-tracing circular-hole collimator support.
+- Multi-GPU execution with `-cuda 0,1,2,...`.
+- Image-domain partitioning instead of rotation partitioning, which helps even when the number of rotations is small.
+- Safer large-matrix bookkeeping with `size_t` in host-side allocation and I/O paths.
+- Scatter kernels copy only the PE matrix columns needed by each GPU worker, reducing per-GPU memory pressure.
 
-This project provides a GPU-based framework for calculating system matrices essential for SPECT (Single Photon Emission Computed Tomography) and PET (Positron Emission Tomography) systems. It is optimized for complex geometrical configurations and leverages GPU acceleration to significantly reduce computation time.
+## Repository Layout
 
-## Features
+| Directory | Purpose |
+| --- | --- |
+| `PEGen_RayTracing_CircularHole` | Photon-electric system matrix generation for circular-hole collimator geometry. |
+| `ScatterGen_RayTracing_CircularHole` | Combined primary Compton scatter generation for detector crystals and collimator holes. |
+| `ScatterGen_Crystal` | Inter-crystal primary Compton scatter generation. |
+| `ScatterGen_Collimator` | Collimator-hole primary Compton scatter generation. |
 
-- **GPU Acceleration:** Utilizes CUDA for high-performance matrix calculations.
-- **Flexible Geometry Support:** Designed to handle complex system geometries.
-- **Modular Structure:** Separate modules for photon-electric and Compton scatter calculations.
-- **Configurable Parameters:** Easily adjustable parameter files to define system configurations.
+Each module contains a `bd` build script, a C++ executable entry point, a CUDA implementation, and a small module-specific `ReadMe.txt`.
 
-## Prerequisites
+## Requirements
 
-- **CUDA Toolkit:** Ensure that the CUDA toolkit is installed and properly configured on your system.
-- **Compiler:** A compatible C++ compiler (e.g., `gcc`, `clang`).
-- **GPU:** NVIDIA GPU with CUDA support (e.g., RTX 6000 Ada).
+- NVIDIA GPU with CUDA support.
+- CUDA Toolkit, tested with CUDA 12.x style paths in the bundled `bd` scripts.
+- Linux-like build environment with `nvcc`, `g++`, and pthread support.
+- Parameter files in binary `float32` format:
+  - `Params_Collimator.dat`
+  - `Params_Detector.dat`
+  - `Params_Image.dat`
+  - `Params_Physics.dat`
 
-## Installation
+> Note: The build scripts currently assume CUDA is installed under `/usr/local/cuda-12.6`. Adjust the `PATH`, `LD_LIBRARY_PATH`, `LIBRARY_PATH`, and linker path in each `bd` file if your CUDA installation is elsewhere.
 
-1. **Clone the Repository:**
+## Quick Start
 
-   ```bash
-   git clone https://github.com/zxc18772763792/GPU-Based-System-Matrix-Calculation-for-SPECT-PET.git
-   cd GPU-Based-System-Matrix-Calculation-for-SPECT-PET
-   ```
+Clone the repository:
 
-2. **Prepare Parameter Files:**
+```bash
+git clone https://github.com/zxc18772763792/GPU-Based-System-Matrix-Calculation-for-SPECT-PET.git
+cd GPU-Based-System-Matrix-Calculation-for-SPECT-PET
+```
 
-   Before compiling, prepare four parameter files (`Param_Collimator.dat`, `Param_Detector.dat`, `Param_Image.dat`, `Param_Physics.dat`) as described in the [Parameter Files](#parameter-files) section.
+Prepare the required `Params_*.dat` files in the module directory you want to run.
 
-## Usage
+Build and run photon-electric matrix generation:
 
-### Calculate Photon-Electric System Matrix
+```bash
+cd PEGen_RayTracing_CircularHole
+./bd
+./PEGen_CircularHole -cuda 0
+```
 
-1. **Compile the Photon-Electric Module:**
+Run on multiple GPUs:
 
-   Navigate to the `PE_Gen_RayTracing_CircularHole` directory and compile the code.
+```bash
+./PEGen_CircularHole -cuda 0,1
+```
 
-   ```bash
-   cd PE_Gen_RayTracing_CircularHole
-   ./bd
-   ```
+The generated PE system matrix is written as:
 
-2. **Run the Photon-Electric System Matrix Generator:**
+```text
+PE_SysMat_shift_<shiftFOVX>_<shiftFOVY>_<shiftFOVZ>_v3.sysmat
+```
 
-   ```bash
-   ./PEGen_CircularHole -cuda 0
-   ```
+## Multi-GPU Mode
 
-   Replace `0` with the appropriate CUDA device ID if necessary. To use multiple
-   GPUs at the same time, pass a comma-separated list, for example:
+Multi-GPU mode is enabled by passing a comma-separated CUDA device list:
 
-   ```bash
-   ./PEGen_CircularHole -cuda 0,1
-   ```
+```bash
+-cuda 0,1,2,3
+```
 
-   Multi-GPU mode splits the image domain by voxel/image-bin ranges. Each GPU
-   computes the same rotation but only for its assigned image pixels, then the
-   host merges the partial columns back into the original system-matrix layout.
-   Scatter kernels also copy only the PE matrix columns needed by each GPU
-   worker, which lowers per-GPU memory use in multi-GPU runs.
+The work is split by image-domain bins:
 
-### Calculate Primary Compton System Matrix
+1. Each GPU receives a contiguous voxel/image-bin range.
+2. Each GPU computes all detector rows for its assigned image-bin range.
+3. The host merges the partial column ranges back into the original system matrix layout.
+4. Output files remain compatible with the single-GPU layout.
 
-1. **Compile the Compton Scatter Module:**
+This is intentionally not split by rotation. Splitting by image bins allows parallelism inside each rotation and is useful when `numRotation` is small.
 
-   Navigate to the `ScatterGen_RayTracing_CircularHole` directory and compile the code.
+For scatter generation, geometry relationship files are generated by a single worker when needed, then reused by later workers. This avoids multiple GPUs trying to write the same geometry file at once.
 
-   ```bash
-   cd ../ScatterGen_RayTracing_CircularHole
-   ./bd
-   ```
+## Photon-Electric Matrix
 
-2. **Run the Primary Compton Scatter System Matrix Generator:**
+Build:
 
-   ```bash
-   ./ScatterGen_CircularHole \
-     -PE <path_to_PE_SystemMatrix> \
-     -GeoCrystal <path_to_CrystalGeometryRelationship> \
-     -GeoCollimator <path_to_CollimatorGeometryRelationship> \
-     -cuda <cuda_device_id[,cuda_device_id...]>
-   ```
+```bash
+cd PEGen_RayTracing_CircularHole
+./bd
+```
 
-   Replace placeholders with the actual paths and CUDA device ID(s). For
-   example, `-cuda 0,1,2,3` uses four GPUs and splits the image-domain pixels
-   across them.
+Run:
 
-### (Optional) Calculate Inter-Crystal Primary Compton System Matrix
+```bash
+./PEGen_CircularHole -cuda 0
+./PEGen_CircularHole -cuda 0,1
+```
 
-1. **Compile the Inter-Crystal Compton Module:**
+## Primary Compton Scatter Matrix
 
-   Navigate to the `ScatterGen_Crystal` directory and compile the code.
+Build:
 
-   ```bash
-   cd ../ScatterGen_Crystal
-   ./bd
-   ```
+```bash
+cd ScatterGen_RayTracing_CircularHole
+./bd
+```
 
-2. **Run the Inter-Crystal Compton System Matrix Generator:**
+Run:
 
-   ```bash
-   ./ScatterGen_Crystal \
-     -PE <path_to_PE_SystemMatrix> \
-     -GeoCrystal <path_to_CrystalGeometryRelationship> \
-     -cuda <cuda_device_id[,cuda_device_id...]>
-   ```
+```bash
+./ScatterGen_CircularHole \
+  -PE <path_to_PE_system_matrix> \
+  -GeoCrystal <path_to_crystal_geometry_relationship> \
+  -GeoCollimator <path_to_collimator_geometry_relationship> \
+  -cuda 0,1
+```
+
+If `-GeoCrystal` or `-GeoCollimator` is omitted, the default filenames are:
+
+```text
+GeometryRelationShip_Crystal2Crystal
+GeometryRelationShip_Collimator2Crystal
+```
+
+## Crystal-Only Scatter
+
+Build:
+
+```bash
+cd ScatterGen_Crystal
+./bd
+```
+
+Run:
+
+```bash
+./ScatterGen_Crystal \
+  -PE <path_to_PE_system_matrix> \
+  -GeoCrystal <path_to_crystal_geometry_relationship> \
+  -cuda 0,1
+```
+
+## Collimator-Only Scatter
+
+Build:
+
+```bash
+cd ScatterGen_Collimator
+./bd
+```
+
+Run:
+
+```bash
+./ScatterGen_Collimator \
+  -PE <path_to_PE_system_matrix> \
+  -GeoCollimator <path_to_collimator_geometry_relationship> \
+  -cuda 0,1
+```
 
 ## Parameter Files
 
-Four parameter files are required to define your system. Each file is a pure `float32` array organized as follows:
+All parameter files are raw binary `float32` arrays. The code currently expects fixed-size buffers for several parameter arrays, so keep the existing index conventions.
 
-### `Param_Collimator.dat`
+### `Params_Collimator.dat`
 
-Defines the collimator configuration.
+Defines collimator layers and holes.
 
-- **Index 0:** `numCollimatorLayers` — Number of collimator layers.
-- **For each Collimator Layer (`id_CollimatorLayer`):**
-  - `[id * 10 + 0]:` Number of Collimator Holes.
-  - `[id * 10 + 1]:` Width of the Collimator Layer (mm).
-  - `[id * 10 + 2]:` Thickness of the Collimator Layer (mm).
-  - `[id * 10 + 3]:` Height of the Collimator Layer (mm).
-  - `[id * 10 + 4]:` Distance between the 1st and current collimator layer (mm).
-  - `[id * 10 + 5]:` Total Attenuation Coefficient.
-  - `[id * 10 + 6]:` Photon-Electric (PE) Attenuation Coefficient.
-  - `[id * 10 + 7]:` Compton Attenuation Coefficient.
-- **For each Hole (`id_Hole`):**
-  - `[id_Hole * 9 + 100]:` X-coordinate of Hole Center.
-  - `[id_Hole * 9 + 101]:` Y1-coordinate of Hole Center.
-  - `[id_Hole * 9 + 102]:` Y2-coordinate of Hole Center.
-  - `[id_Hole * 9 + 103]:` Z-coordinate of Hole Center.
-  - `[id_Hole * 9 + 104]:` Radius of Hole.
-  - `[id_Hole * 9 + 105]:` Total Attenuation Coefficient of Hole.
-  - `[id_Hole * 9 + 106]:` PE Attenuation Coefficient of Hole.
-  - `[id_Hole * 9 + 107]:` Compton Attenuation Coefficient of Hole.
-  - `[id_Hole * 9 + 108]:` Flag.
+| Index | Meaning |
+| --- | --- |
+| `0` | Number of collimator layers. |
+| `(layer + 1) * 10 + 0` | Number of holes in this layer. |
+| `(layer + 1) * 10 + 1` | Layer width in X direction, in mm. |
+| `(layer + 1) * 10 + 2` | Layer thickness in Y direction, in mm. |
+| `(layer + 1) * 10 + 3` | Layer height in Z direction, in mm. |
+| `(layer + 1) * 10 + 4` | Distance from the first collimator layer, in mm. |
+| `(layer + 1) * 10 + 5` | Total attenuation coefficient. |
+| `(layer + 1) * 10 + 6` | Photon-electric attenuation coefficient. |
+| `(layer + 1) * 10 + 7` | Compton attenuation coefficient. |
 
-### `Param_Detector.dat`
+Hole data starts at index `100`:
 
-Defines the detector configuration.
+| Index | Meaning |
+| --- | --- |
+| `hole * 9 + 100` | Hole center X. |
+| `hole * 9 + 101` | Hole Y1. |
+| `hole * 9 + 102` | Hole Y2. |
+| `hole * 9 + 103` | Hole center Z. |
+| `hole * 9 + 104` | Hole radius. |
+| `hole * 9 + 105` | Total attenuation coefficient. |
+| `hole * 9 + 106` | Photon-electric attenuation coefficient. |
+| `hole * 9 + 107` | Compton attenuation coefficient. |
+| `hole * 9 + 108` | Flag. |
 
-- **Index 0:** `numDetectorBins` — Number of detector bins.
-- **For each Detector (`id_Detector`):**
-  - `[id * 12 + 1]:` X-coordinate of Detector Center.
-  - `[id * 12 + 2]:` Y-coordinate of Detector Center (set Y of 1st collimator to 0).
-  - `[id * 12 + 3]:` Z-coordinate of Detector Center.
-  - `[id * 12 + 4]:` Width of Detector (mm).
-  - `[id * 12 + 5]:` Thickness of Detector (mm).
-  - `[id * 12 + 6]:` Height of Detector (mm).
-  - `[id * 12 + 7]:` Total Attenuation Coefficient (excluding Rayleigh scatter).
-  - `[id * 12 + 8]:` Photon-Electric (PE) Attenuation Coefficient.
-  - `[id * 12 + 9]:` Compton Attenuation Coefficient.
-  - `[id * 12 + 10]:` Energy Resolution at Target PE Energy.
-  - `[id * 12 + 11]:` Rotation Angle of Detector (Y-axis) [0, 2π).
-  - `[id * 12 + 12]:` Flag.
+### `Params_Detector.dat`
 
-### `Param_Image.dat`
+Defines detector crystal geometry and material coefficients.
 
-Defines the image voxel configuration.
+| Index | Meaning |
+| --- | --- |
+| `0` | Number of detector bins. |
+| `detector * 12 + 1` | Detector center X. |
+| `detector * 12 + 2` | Detector center Y. |
+| `detector * 12 + 3` | Detector center Z. |
+| `detector * 12 + 4` | Detector width, in mm. |
+| `detector * 12 + 5` | Detector thickness, in mm. |
+| `detector * 12 + 6` | Detector height, in mm. |
+| `detector * 12 + 7` | Total attenuation coefficient. |
+| `detector * 12 + 8` | Photon-electric attenuation coefficient. |
+| `detector * 12 + 9` | Compton attenuation coefficient. |
+| `detector * 12 + 10` | Energy resolution at target PE energy. |
+| `detector * 12 + 11` | Detector rotation angle around the Y axis, in radians. |
+| `detector * 12 + 12` | Flag. |
 
-- **Index 0:** `numImageVoxelX` — Number of image voxels along the X-axis.
-- **Index 1:** `numImageVoxelY` — Number of image voxels along the Y-axis.
-- **Index 2:** `numImageVoxelZ` — Number of image voxels along the Z-axis.
-- **Index 3:** `widthImageVoxelX` (mm) — Width of each voxel along the X-axis.
-- **Index 4:** `widthImageVoxelY` (mm) — Width of each voxel along the Y-axis.
-- **Index 5:** `widthImageVoxelZ` (mm) — Width of each voxel along the Z-axis.
-- **Index 6:** `numRotation` — Number of rotations.
-- **Index 7:** `anglePerRotation` (0~2π) — Angle increment per rotation.
-- **Index 8:** `shiftFOVX` (mm) — Shift of the Field of View (FOV) along the X-axis.
-- **Index 9:** `shiftFOVY` (mm) — Shift of the FOV along the Y-axis.
-- **Index 10:** `shiftFOVZ` (mm) — Shift of the FOV along the Z-axis.
-- **Index 11:** `FOV2Collimator0` (mm) — Distance from FOV to Collimator layer 0.
+### `Params_Image.dat`
 
-### `Param_Physics.dat`
+Defines the image grid and rotation setup.
 
-Defines the physics parameters for the simulation.
+| Index | Meaning |
+| --- | --- |
+| `0` | Number of image voxels along X. |
+| `1` | Number of image voxels along Y. |
+| `2` | Number of image voxels along Z. |
+| `3` | Voxel width along X, in mm. |
+| `4` | Voxel width along Y, in mm. |
+| `5` | Voxel width along Z, in mm. |
+| `6` | Number of rotations. |
+| `7` | Angle per rotation, in radians. |
+| `8` | FOV shift along X, in mm. |
+| `9` | FOV shift along Y, in mm. |
+| `10` | FOV shift along Z, in mm. |
+| `11` | Distance from FOV center to the first collimator layer, in mm. |
+| `20` | Current rotation index, set internally by the executables. |
 
-- **Index 0:** `flagUsingCompton` — Enable (1) or disable (0) Compton scattering.
-- **Index 1:** `flagSavingPESysmat` — Enable (1) or disable (0) saving PE system matrix.
-- **Index 2:** `flagSavingComptonSysmat` — Enable (1) or disable (0) saving Compton system matrix.
-- **Index 3:** `flagSavingPEComptonSysmat` — Enable (1) or disable (0) saving combined PE and Compton system matrix.
-- **Index 4:** `flagUsingSameEnergyWindow` — Use (1) or not (0) the same energy window.
-- **Index 5:** `lowerThresholdEnergyWindow` — Lower threshold of the energy window.
-- **Index 6:** `upperThresholdEnergyWindow` — Upper threshold of the energy window.
-- **Index 7:** `targetPEEnergy` — Target PE energy.
-- **Index 8:** `flagCalculateCrystalGeometryRelationship` — Enable (1) or disable (0) calculation of crystal geometry relationship.
-- **Index 9:** `flagCalculateCollimatorGeometryRelationship` — Enable (1) or disable (0) calculation of collimator geometry relationship.
+### `Params_Physics.dat`
 
-## Contact
+Defines scatter and output switches.
 
-This program has been tested with an advanced SPECT system, and the analytical system matrix matches perfectly with experimental results. Calculating the photon-electric system matrix for a 200x200 2D FOV with ~6000 crystals on an RTX 6000 Ada GPU takes approximately **3 minutes**, while calculating the primary Compton scatter system matrix takes about **60 minutes**.
+| Index | Meaning |
+| --- | --- |
+| `0` | Enable Compton scattering. |
+| `1` | Save PE system matrix. |
+| `2` | Save Compton scatter system matrix. |
+| `3` | Save combined PE plus Compton system matrix. |
+| `4` | Use the same energy window for all detector crystals. |
+| `5` | Lower energy-window threshold. |
+| `6` | Upper energy-window threshold. |
+| `7` | Target PE energy. |
+| `8` | Recalculate crystal-to-crystal geometry relationship. |
+| `9` | Recalculate collimator-to-crystal geometry relationship. |
 
-**Note:** There are some hard-coded elements in the current version. I apologize for any inconvenience and plan to address these issues when time permits. If you have any questions or need assistance, feel free to reach out.
+## Output Files
 
-- **Email:** [18772763792@163.com](mailto:18772763792@163.com) or [zhengxc21@mails.tsinghua.edu.cn](mailto:zhengxc21@mails.tsinghua.edu.cn)
-- **WeChat:** zxc18772763792
+Common output names include:
 
-## Acknowledgements
+| File | Meaning |
+| --- | --- |
+| `PE_SysMat_shift_*.sysmat` | Photon-electric system matrix. |
+| `Scatter_SysMat_shift_*.sysmat` | Primary Compton scatter system matrix. |
+| `SysMat_withScatter_shift_*.sysmat` | Combined PE and scatter system matrix. |
+| `GeometryRelationShip_Crystal2Crystal` | Cached crystal geometry relationship bitmap. |
+| `GeometryRelationShip_Collimator2Crystal` | Cached collimator geometry relationship bitmap. |
 
-Thank you for using this tool. Contributions and feedback are welcome to help improve its functionality and performance.
+## Change Log
 
+### 2026-05-18
+
+- Added multi-GPU execution through comma-separated CUDA device lists such as `-cuda 0,1,2,3`.
+- Changed multi-GPU scheduling to split the image domain by voxel/image-bin ranges instead of splitting by rotation.
+- Preserved the original output system-matrix layout by merging GPU-local image-bin ranges on the host.
+- Updated PE generation to compute only each worker's assigned image-bin range.
+- Updated scatter kernels to use global image-bin coordinates for physics calculations and local image-bin coordinates for GPU-local output storage.
+- Reduced scatter memory use by copying only the PE matrix columns required by each GPU worker in crystal scatter paths.
+- Removed unnecessary PE matrix GPU allocation in collimator-only scatter generation.
+- Fixed scatter rotation handling so each rotation uses the matching PE system-matrix slice.
+- Added worker error checks so failed GPU workers stop the run instead of silently producing partial output.
+- Switched host-side large matrix allocation and I/O counts to `size_t` in scatter executables.
+- Updated build scripts to compile with C++11 and link pthread support.
+- Rewrote the main README with current module names, multi-GPU usage, parameter layout, output files, and this change log.
+
+## Known Limitations
+
+- Several array sizes and parameter offsets are still hard-coded.
+- The `bd` scripts assume a CUDA 12.6 installation path and may need local edits.
+- CUDA compilation and runtime validation should be performed on a CUDA-capable Linux system.
+- Geometry relationship caches are tied to the detector and collimator configuration. Regenerate them when geometry changes.
+
+## Citation
+
+If you use this project in academic work, please cite:
+
+> Xingchun Zheng, etc., "GPU-Based System Matrix Calculation for SPECT/PET", GitHub repository, 2023. https://github.com/zxc18772763792/GPU-Based-System-Matrix-Calculation-for-SPECT-PET
 
 ## Usage Terms
 
-This software is available **strictly for academic, research, and educational purposes only**. Commercial use is expressly prohibited without prior written permission. 
+This software is available strictly for academic, research, and educational purposes only. Commercial use is prohibited without prior written permission.
 
-When using this work in academic publications or research, you must include proper attribution:
+## Contact
 
-> [Xingchun Zheng, etc.], "GPU-Based System Matrix Calculation for SPECT/PET", GitHub repository, 2023. https://github.com/zxc18772763792/GPU-Based-System-Matrix-Calculation-for-SPECT-PET
+- Email: [18772763792@163.com](mailto:18772763792@163.com)
+- Email: [zhengxc21@mails.tsinghua.edu.cn](mailto:zhengxc21@mails.tsinghua.edu.cn)
+- WeChat: `zxc18772763792`
 
 ## License
 
 This work is licensed under the [Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License](http://creativecommons.org/licenses/by-nc-sa/4.0/).
-
-
----
