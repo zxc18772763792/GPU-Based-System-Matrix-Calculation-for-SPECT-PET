@@ -399,8 +399,9 @@ bool Simulation::setup(std::string& err) {
     C.srcUniform = ss != "center" && ss != "centre";
     std::string ds = lower(cfg.str("direction_sampling", "rect"));
     C.dirRect = ds != "iso" && ds != "isotropic";
-    C.detBias = (float)cfg.num("detector_bias", 0.8);
-    if (C.detBias < 0.0f || C.detBias > 0.99f) { err = "detector_bias must be in [0, 0.99]"; return false; }
+    // hole_bias / detector_bias: "auto" (default) is resolved once the collimator is known
+    std::string hbSpec = lower(cfg.str("hole_bias", "auto")), dbSpec = lower(cfg.str("detector_bias", "auto"));
+    C.tgtMargin = (float)cfg.num("hole_target_margin", 0.25);
     std::string phys = lower(cfg.str("physics", "full"));
     if (phys != "full" && phys != "primary_pe") { err = "physics must be full | primary_pe"; return false; }
     C.primaryOnly = phys == "primary_pe";
@@ -673,6 +674,60 @@ bool Simulation::setup(std::string& err) {
         }
     }
     if (nM == 0) { err = "no materials (all attenuation coefficients are zero?)"; return false; }
+
+    // hole-aperture targeting: the front-most layer with holes (or hole_target_layer)
+    g.tgtLayer = -1;
+    g.tgtTan = 0.0f; g.tgtRmax = 0.0f; g.tgtAcc = 1.5f; g.tgtHoleStart = 0; g.tgtHoleCount = 0;
+    {
+        int want = (int)cfg.integer("hole_target_layer", -1);
+        float bestY = kBig;
+        for (int m = 0; m < g.nLayers; ++m) {
+            bool hasHoles = false;
+            for (int h = 0; h < hg.numHoles; ++h) hasHoles = hasHoles || hg.holeLayer[h] == m;
+            if (!hasHoles) continue;
+            if (want >= 0 ? m == want : g.layY1[m] < bestY) { g.tgtLayer = m; bestY = g.layY1[m]; }
+        }
+        if (g.tgtLayer >= 0) {
+            int m = g.tgtLayer;
+            float acc = (float)cfg.num("hole_target_acceptance", 1.5);  // x geometric channel acceptance
+            g.tgtAcc = acc;
+            g.tgtHoleStart = -1;
+            for (int h = 0; h < hg.numHoles; ++h) {
+                if (hg.holeLayer[h] != m) continue;
+                if (g.tgtHoleStart < 0) g.tgtHoleStart = h;
+                g.tgtHoleCount++;
+                float r = hg.hole1[h].y;
+                float len = std::min(hg.hole1[h].x, g.layY2[m]) - std::max(hg.hole0[h].w, g.layY1[m]);
+                float tanA = len > 1e-3f ? acc * 2.0f * r / len : 10.0f;
+                g.tgtTan = std::max(g.tgtTan, std::min(tanA, 10.0f));
+                g.tgtRmax = std::max(g.tgtRmax, r);
+            }
+        }
+    }
+
+    // Sampling mixture defaults (figure-of-merit study, see ReadMe): aiming at hole apertures
+    // gains 5-10x when the target plate is opaque (mu*T >= 5, e.g. W at 140 keV) but loses ~2x
+    // when septal penetration dominates (W at 511 keV, thin plates).
+    {
+        double opacity = 0.0;
+        if (g.tgtLayer >= 0 && g.layMat[g.tgtLayer] >= 0) {
+            int m = g.tgtLayer, mat = g.layMat[m];
+            double t = (std::log(C.E0) - std::log(hm.eMin)) / std::log(hm.eMax / hm.eMin) * (hm.nE - 1);
+            int i = std::min(std::max((int)t, 0), hm.nE - 2);
+            double f = t - i;
+            double mu = hm.muTot[(size_t)mat * hm.nE + i] * (1 - f) + hm.muTot[(size_t)mat * hm.nE + i + 1] * f;
+            opacity = mu * (g.layY2[m] - g.layY1[m]);
+        }
+        C.holeBias = hbSpec == "auto" ? (opacity >= 5.0 ? 0.5f : 0.0f) : (float)atof(hbSpec.c_str());
+        C.detBias = dbSpec == "auto" ? (C.holeBias > 0.0f ? 0.3f : 0.8f) : (float)atof(dbSpec.c_str());
+        if (C.detBias < 0.0f || C.holeBias < 0.0f || C.detBias + C.holeBias > 0.95f) {
+            err = "detector_bias and hole_bias must be >= 0 with detector_bias + hole_bias <= 0.95";
+            return false;
+        }
+        if (g.tgtLayer >= 0)
+            materialReport.push_back("hole targeting: layer " + std::to_string(g.tgtLayer) + ", mu*T = " + fmt("%.3g", opacity) +
+                                     (hbSpec == "auto" ? (C.holeBias > 0 ? " (opaque -> on)" : " (penetrable -> off)") : " (set by hole_bias)"));
+    }
 
     // assembly box (finite plates + enabled crystals) and crystal box
     for (int a = 0; a < 3; ++a) {

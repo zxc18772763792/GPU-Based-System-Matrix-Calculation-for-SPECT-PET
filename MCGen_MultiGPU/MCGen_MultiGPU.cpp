@@ -94,9 +94,13 @@ int main(int argc, char* argv[]) {
     printf("Physics              : %s, Rayleigh %s, fluorescence %s, cut %.1f keV\n",
            C.primaryOnly ? "primary_pe (analytic-equivalent)" : "full",
            S.cfg.integer("rayleigh", 1) ? "on" : "off", C.fluo ? "on" : "off", C.eCut);
-    if (C.dirRect)
-        printf("Source               : %s in voxel, importance-sampled directions (detector_bias %.2f)\n",
+    if (C.dirRect) {
+        printf("Source               : %s in voxel, importance-sampled directions (detector_bias %.2f",
                C.srcUniform ? "uniform" : "centre", C.detBias);
+        if (S.hg.g.tgtLayer >= 0 && C.holeBias > 0)
+            printf(", hole_bias %.2f on layer %d holes", C.holeBias, S.hg.g.tgtLayer);
+        printf(")\n");
+    }
     else
         printf("Source               : %s in voxel, isotropic directions\n", C.srcUniform ? "uniform" : "centre");
     printf("Image                : %d x %d x %d voxels (%.3g x %.3g x %.3g mm), rotations %d..%d of %d\n", C.nX, C.nY,
@@ -278,6 +282,7 @@ int main(int argc, char* argv[]) {
                 C.primaryOnly ? "primary_pe" : "full", S.cfg.integer("rayleigh", 1) ? "true" : "false", C.fluo ? "true" : "false");
         fprintf(f, "  \"direction_sampling\": \"%s\",\n  \"detector_bias\": %.3f,\n  \"source_sampling\": \"%s\",\n",
                 C.dirRect ? "rect" : "iso", C.detBias, C.srcUniform ? "uniform" : "center");
+        fprintf(f, "  \"hole_bias\": %.3f,\n  \"hole_target_layer\": %d,\n", C.holeBias, S.hg.g.tgtLayer);
         fprintf(f, "  \"histories_per_voxel\": %lld,\n  \"total_histories\": %lld,\n", S.histPerVoxel, totalHist);
         fprintf(f, "  \"yield\": %.6g,\n  \"seed\": %llu,\n", S.yield, (unsigned long long)C.seed);
         fprintf(f, "  \"image\": [%d,%d,%d],\n  \"num_detectors\": %d,\n  \"num_voxels\": %d,\n", C.nX, C.nY, C.nZ, S.numDet, S.numVox);

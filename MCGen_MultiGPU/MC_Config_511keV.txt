@@ -23,14 +23,15 @@ physics             = full
 rayleigh            = 1
 fluorescence        = 1               # Lu/Bi/Gd K x-rays (54-90 keV) escaping or reabsorbed
 energy_cutoff_keV   = 10
-shield_outside_collimator = absorber  # at 511 keV the plate edges matter: see ReadMe (validation 4)
+shield_outside_collimator = absorber  # at 511 keV the plate edges matter: see ReadMe (validation 5)
 yield               = 1.0             # set 1.934 (= 2 x 0.967) for counts per F-18 decay
 
 # ---------------------------------------------------------------- sampling / run
 histories_per_voxel = 1000000
 source_sampling     = uniform
 direction_sampling  = rect
-detector_bias       = 0.7             # keep more samples on the whole plate: penetration/scatter matter
+detector_bias       = auto              # auto: 0.3 with hole aiming, else 0.8
+hole_bias           = auto              # auto: aim at holes only if the plate is opaque (mu*T >= 5)
 seed                = 20241221
 backend             = gpu
 gpus                = all

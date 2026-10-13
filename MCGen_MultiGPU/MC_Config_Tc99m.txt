@@ -35,7 +35,8 @@ shield_outside_collimator = absorber  # absorber | slab (frame of the same mater
 histories_per_voxel = 1000000
 source_sampling     = uniform         # uniform | center
 direction_sampling  = rect            # rect (importance sampled, unbiased) | iso
-detector_bias       = 0.8
+detector_bias       = auto              # auto: 0.3 with hole aiming, else 0.8
+hole_bias           = auto              # auto: aim at holes only if the plate is opaque (mu*T >= 5)
 seed                = 20241221
 backend             = gpu             # gpu | cpu
 gpus                = all             # all | 0,1,2,3

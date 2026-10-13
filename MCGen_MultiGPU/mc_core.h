@@ -45,6 +45,7 @@ constexpr int kMaxStack = 4;                  // secondary (fluorescence) photon
 constexpr int kMaxWindows = 4;
 constexpr int kMaxSteps = 100000;
 constexpr int kNumClasses = 3;                // primary / collimator-scatter / crystal-scatter
+constexpr int kMaxTargets = 32;               // collimator holes aimed at per voxel
 
 enum EventClass { kPrimary = 0, kCollimatorScatter = 1, kCrystalScatter = 2 };
 enum VertexType { kVtxEmit = 0, kVtxPhoto = 1, kVtxCompton = 2, kVtxRayleigh = 3,
@@ -60,6 +61,10 @@ MC_HD V3 operator*(V3 a, float s) { return make3(a.x * s, a.y * s, a.z * s); }
 MC_HD float dot(V3 a, V3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 
 struct alignas(16) F4 { float x, y, z, w; };
+#if !defined(__CUDA_ARCH__)
+MC_HD int max(int a, int b) { return a > b ? a : b; }
+MC_HD int min(int a, int b) { return a < b ? a : b; }
+#endif
 
 // ---------------------------------------------------------------------------
 // Philox4x32-10 counter based RNG (Salmon et al., SC'11).
@@ -167,6 +172,10 @@ struct Geometry {
     // bounding boxes for direction biasing: everything that can interact / enabled crystals
     float asmMin[3], asmMax[3];
     float detMin[3], detMax[3];
+    // hole-aperture targeting: layer whose holes are aimed at (-1 = off), the largest
+    // acceptance tan(theta) of its channels and the largest hole radius
+    int tgtLayer, tgtHoleStart, tgtHoleCount;   // target layer and its hole index range
+    float tgtAcc, tgtTan, tgtRmax;   // acceptance factor x 2r/L, its maximum over holes, max radius
 };
 
 struct SimConsts {
@@ -177,6 +186,8 @@ struct SimConsts {
     int srcUniform;                    // 1: uniform in voxel, 0: voxel centre
     int dirRect;                       // 1: importance sampling towards the assembly, 0: 4pi
     float detBias;                     // mixture weight of the crystal-block rectangle
+    float holeBias;                    // mixture weight of the hole-aperture component
+    float tgtMargin;                   // aperture square half size = r * (1 + tgtMargin)
     int primaryOnly;                   // 1: analytic-equivalent mode (any scatter kills, no fluo)
     int fluo;
     float eCut;
@@ -617,7 +628,91 @@ MC_HD V3 voxelCentre(const SimConsts& C, int voxel, int& ix, int& iy, int& iz) {
                  (iz - C.nZ / 2.0f + 0.5f) * C.wZ + C.shZ);
 }
 
-MC_HD float sampleSource(const Geometry& G, const SimConsts& C, int voxel, int rot,
+// ---------------------------------------------------------------------------
+// Hole-aperture targeting. For every voxel the holes of the target layer whose
+// straight channel can be traversed from (near) the voxel are listed once; a
+// mixture component then aims photons uniformly at a square around the entrance
+// aperture of one of them. The list depends only on (voxel, rotation), so results
+// stay independent of how work is split; it only changes the sampling density,
+// which enters the weight, so the estimator stays unbiased.
+// ---------------------------------------------------------------------------
+struct HoleTargets { int n; int id[kMaxTargets]; };
+
+MC_HD V3 voxelWorld(const SimConsts& C, int voxel, int rot) {
+    int ix, iy, iz;
+    V3 v = voxelCentre(C, voxel, ix, iy, iz);
+    float a = rot * C.angPerRot, ca = cosf(a), sa = sinf(a);
+    return make3(v.x * ca - v.y * sa, v.x * sa + v.y * ca, v.z);
+}
+
+MC_HD void buildHoleTargets(const Geometry& G, const SimConsts& C, int voxel, int rot, HoleTargets& T) {
+    T.n = 0;
+    const int m = G.tgtLayer;
+    if (!C.dirRect || C.holeBias <= 0.0f || m < 0) return;
+    V3 V = voxelWorld(C, voxel, rot);
+    float depth = G.layY1[m] - V.y;
+    if (depth <= 0.0f) return;
+    float slack = 0.5f * sqrtf(C.wX * C.wX + C.wY * C.wY + C.wZ * C.wZ);
+    float Rb = depth * G.tgtTan + G.tgtRmax + slack;   // bound on |hole centre - voxel| (x-z)
+    float inv = G.hgInvCell[m];
+    int x0 = max(0, (int)floorf((V.x - Rb - G.hgOx[m]) * inv)), x1 = min(G.hgNx[m] - 1, (int)floorf((V.x + Rb - G.hgOx[m]) * inv));
+    int z0 = max(0, (int)floorf((V.z - Rb - G.hgOz[m]) * inv)), z1 = min(G.hgNz[m] - 1, (int)floorf((V.z + Rb - G.hgOz[m]) * inv));
+    if (x1 < x0 || z1 < z0) return;
+    float score[kMaxTargets];
+    auto consider = [&](int h) {
+        F4 a = G.hole0[h];
+        float r = G.hole1[h].y;
+        float len = fminf(G.hole1[h].x, G.layY2[m]) - fmaxf(a.w, G.layY1[m]);
+        float tanAcc = len > 1e-3f ? fminf(G.tgtTan, G.tgtAcc * 2.0f * r / len) : G.tgtTan;
+        float dx = a.x - V.x, dz = a.y - V.z;
+        float lim = (fmaxf(a.w, G.layY1[m]) - V.y) * tanAcc + r + slack;
+        float d = sqrtf(dx * dx + dz * dz) / lim;           // < 1: channel reachable
+        if (d >= 1.0f) return;
+        if (T.n < kMaxTargets) { T.id[T.n] = h; score[T.n] = d; ++T.n; return; }
+        int worst = 0;                                      // keep the best aligned holes
+        for (int i = 1; i < kMaxTargets; ++i) if (score[i] > score[worst]) worst = i;
+        if (d < score[worst] || (d == score[worst] && h < T.id[worst])) { T.id[worst] = h; score[worst] = d; }
+    };
+    long long nCells = (long long)(x1 - x0 + 1) * (z1 - z0 + 1);
+    if (nCells > G.tgtHoleCount) {                          // wide acceptance (thin plate / pinholes)
+        if (G.tgtHoleCount > 65536) return;
+        for (int h = G.tgtHoleStart; h < G.tgtHoleStart + G.tgtHoleCount; ++h) consider(h);
+        return;
+    }
+    for (int cx = x0; cx <= x1; ++cx)
+        for (int cz = z0; cz <= z1; ++cz) {
+            int cell = G.hgBase[m] + cx * G.hgNz[m] + cz;
+            for (int k = G.hgCellStart[cell]; k < G.hgCellStart[cell + 1]; ++k) {
+                int h = G.hgItems[k];
+                F4 a = G.hole0[h];
+                // count each hole once: in the cell that contains its centre
+                if ((int)floorf((a.x - G.hgOx[m]) * inv) != cx || (int)floorf((a.y - G.hgOz[m]) * inv) != cz) continue;
+                consider(h);
+            }
+        }
+}
+
+MC_HD void holeSquare(const Geometry& G, const SimConsts& C, int h, float& y, float& cx, float& cz, float& half) {
+    F4 a = G.hole0[h];
+    y = fmaxf(a.w, G.layY1[G.tgtLayer]);
+    cx = a.x; cz = a.y;
+    half = G.hole1[h].y * (1.0f + C.tgtMargin);
+}
+
+MC_HD float holesPdf(const Geometry& G, const SimConsts& C, const HoleTargets& T, V3 p, V3 d) {
+    if (d.y <= 0.0f) return 0.0f;
+    float sum = 0.0f;
+    for (int i = 0; i < T.n; ++i) {
+        float y, cx, cz, hf;
+        holeSquare(G, C, T.id[i], y, cx, cz, hf);
+        float t = (y - p.y) / d.y;
+        if (t <= 0.0f) continue;
+        if (fabsf(p.x + d.x * t - cx) <= hf && fabsf(p.z + d.z * t - cz) <= hf) sum += t * t / (4.0f * hf * hf * d.y);
+    }
+    return sum / (float)T.n;
+}
+
+MC_HD float sampleSource(const Geometry& G, const SimConsts& C, int voxel, int rot, const HoleTargets* T,
                          Philox& rng, V3& pos, V3& dir) {
     int ix, iy, iz;
     V3 v = voxelCentre(C, voxel, ix, iy, iz);
@@ -636,21 +731,36 @@ MC_HD float sampleSource(const Geometry& G, const SimConsts& C, int voxel, int r
         return 1.0f;
     }
     ProjRect B = projectBox(G.detMin, G.detMax, pos);
-    float alpha = B.ok ? C.detBias : 0.0f;
-    dir = (rng.uniform() < alpha) ? aimAt(B, pos, rng) : aimAt(A, pos, rng);
-    float pdf = (1.0f - alpha) * rectPdf(A, pos, dir) + alpha * rectPdf(B, pos, dir);
+    // mixture weights: holes (if any are reachable), crystal block, whole assembly (defensive)
+    float wH = (T && T->n > 0 && G.tgtLayer >= 0 && pos.y < G.layY1[G.tgtLayer]) ? C.holeBias : 0.0f;
+    float wB = B.ok ? C.detBias : 0.0f;
+    float u = rng.uniform();
+    if (u < wH) {
+        int k = min((int)(rng.uniform() * T->n), T->n - 1);
+        float y, cx, cz, hf;
+        holeSquare(G, C, T->id[k], y, cx, cz, hf);
+        V3 q = make3(cx + (2.0f * rng.uniform() - 1.0f) * hf, y, cz + (2.0f * rng.uniform() - 1.0f) * hf);
+        V3 D = q - pos;
+        dir = D * (1.0f / sqrtf(dot(D, D)));
+    } else if (u < wH + wB) {
+        dir = aimAt(B, pos, rng);
+    } else {
+        dir = aimAt(A, pos, rng);
+    }
+    float pdf = (1.0f - wH - wB) * rectPdf(A, pos, dir) + wB * rectPdf(B, pos, dir);
+    if (wH > 0.0f) pdf += wH * holesPdf(G, C, *T, pos, dir);
     return pdf > 0.0f ? 1.0f / (4.0f * kPi * pdf) : 0.0f;
 }
 
 // One full history (primary + fluorescence secondaries). Returns the weight.
-MC_HD float runHistory(const Geometry& G, const Materials& M, const SimConsts& C,
+MC_HD float runHistory(const Geometry& G, const Materials& M, const SimConsts& C, const HoleTargets* T,
                        int voxel, int rot, Philox& rng, Deposits& D, Tracer& tr) {
     D.n = 0;
     Stack S;
     S.n = 0;
     Photon ph;
     V3 pos, dir;
-    float w = sampleSource(G, C, voxel, rot, rng, pos, dir);
+    float w = sampleSource(G, C, voxel, rot, T, rng, pos, dir);
     ph.p = pos;
     setDir(ph, dir);
     setEnergy(M, ph, C.E0);

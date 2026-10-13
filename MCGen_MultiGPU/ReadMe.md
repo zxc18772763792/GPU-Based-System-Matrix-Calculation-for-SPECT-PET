@@ -20,6 +20,7 @@ MCGen_MultiGPU/
   data/materials.db    光子截面库 (xraylib 生成，1–1100 keV)
   tools/gen_material_db.py   重新生成 / 添加材料
   tests/test_physics.cpp     RNG、Klein-Nishina、Rayleigh、荧光自检
+  tests/reference_mc.py      独立 numpy 参考 MC，交叉验证完整输运（多次康普顿 + 光电）
   MC_Config_Tc99m.txt  140.5 keV 示例配置
   MC_Config_511keV.txt 511 keV 示例配置
   bd, Makefile         编译脚本
@@ -85,7 +86,7 @@ python3 ../../Visualizer/serve.py --data .
 | 瑞利 | 独立原子形状因子 F(x)：按 F² 抽样 x²，再以 (1+cos²θ)/2 拒绝 |
 | 输运 | 区域内 Woodcock (delta) 追踪 + 能量相关主值；准直孔内精确解析飞行（一步穿过孔）；均匀网格查找孔与晶体 |
 | 探测器响应 | 每个晶体独立读出：一次历史中各晶体的沉积能量求和后，按高斯能量分辨率 R(E)=R0·(E0/E)^0.5（R0 = Param_Detector[10]）计算落入各能窗的概率（期望值估计，方差更小） |
-| 屏蔽 | `shield_outside_collimator`：准直器板所在 y 范围内、板外区域的处理。`absorber`（默认）全吸收；`slab` 同材料的外框（默认覆盖晶体阵列 + 20 mm）；`none` 不处理。见“验证 4” |
+| 屏蔽 | `shield_outside_collimator`：准直器板所在 y 范围内、板外区域的处理。`absorber`（默认）全吸收；`slab` 同材料的外框（默认覆盖晶体阵列 + 20 mm）；`none` 不处理。见“验证 5” |
 | 计数精度 | GPU 每次启动先用 float 原子累加（每体素每次启动 ≤ 16384 个历史），随即并入 double 累加器；CPU 直接用 double |
 
 ### 140.5 keV 与 511 keV 的要点
@@ -100,13 +101,25 @@ python3 ../../Visualizer/serve.py --data .
 
 ## 方差缩减（无偏）
 
-`direction_sampling = rect`（默认）使用两个“投影矩形”密度的防御性混合：
+`direction_sampling = rect`（默认）的发射方向来自三个分量的防御性混合，权重为 `1/(4π·p_mix(ω))`：
 
-* A：整个装置（准直器 + 晶体）包围盒投影到其前表面的矩形 —— 覆盖所有可能相互作用的方向；
-* B：晶体包围盒的投影矩形。
+| 分量 | 概率 | 抽样方式 |
+|---|---|---|
+| A 装置 | `1 − hole_bias − detector_bias` | 整个装置（准直器 + 晶体）包围盒投影到其前表面的矩形；覆盖所有可能相互作用的方向，保证无偏 |
+| B 晶体 | `detector_bias` | 晶体阵列包围盒的投影矩形 |
+| H 准直孔 | `hole_bias` | 每个体素预先列出其“看得见”的目标层准直孔（孔道接收角 × `hole_target_acceptance` 之内，最多 32 个），均匀选一个孔，瞄准其入口处边长 2r(1+`hole_target_margin`) 的正方形 |
 
-以概率 `detector_bias` 朝 B 抽样，否则朝 A，权重为 `1/(4π·p_mix)`。所有能到达装置的方向都有正概率，
-因此估计 **无偏**（包括准直器任意位置的散射）。在示例几何中相对朝整个板抽样方差降低约 16 倍。
+H 的孔列表只依赖 (体素, 旋转)，所以结果仍与 GPU 数量和任务切分无关。品质因数（FOM = 1/(误差²·时间)）实测：
+
+| 几何 | 能量 | 准直板 μT | FOM 提升（总灵敏度 / 单元素） |
+|---|---|---|---|
+| 平行孔，25 mm W，2822 孔 | 140.5 keV | 90 | 7× / 7× |
+| 针孔，6 mm W | 140.5 keV | 22 | 5× / 10× |
+| 针孔，10 mm W | 511 keV | 2.6 | 0.6× / 0.3×（穿透主导，不宜瞄准） |
+| 针孔，1 mm W | 140.5 keV | 3.6 | 0.4× / 0.5× |
+
+因此默认 `hole_bias = auto`：目标层对 E0 不透明（μT ≥ 5）时取 0.5（此时 `detector_bias` = 0.3），否则为 0（`detector_bias` = 0.8）。
+程序启动时会打印判定结果。无偏性已用不同种子、两种抽样方式的 MC 互相比较（4 个旋转位置差异 < 0.6σ）以及与解析结果的比较确认。
 `iso` 为各向同性抽样，用于验证。
 
 ## 配置参数
@@ -131,7 +144,9 @@ python3 ../../Visualizer/serve.py --data .
 | `shield_outside_collimator` | `absorber` | `absorber` / `slab` / `none`，见上；`slab` 外框大小由 `shield_frame_margin_mm`（20）或 `shield_frame_halfwidth_mm` / `shield_frame_halfheight_mm` 指定 |
 | `histories_per_voxel` | 1e5 | 每体素历史数 |
 | `source_sampling` | `uniform` | `uniform`（体素内均匀）/ `center`（体素中心，同解析代码） |
-| `direction_sampling`, `detector_bias` | `rect`, 0.8 | 见“方差缩减” |
+| `direction_sampling` | `rect` | `rect`（重要性抽样，无偏）/ `iso` |
+| `hole_bias`, `detector_bias` | `auto`, `auto` | 混合权重，见“方差缩减” |
+| `hole_target_layer`, `hole_target_acceptance`, `hole_target_margin` | 最前层, 1.5, 0.25 | 孔定向的目标层、接收角放宽倍数、入口正方形余量 |
 | `seed` | 20241221 | 随机数种子 |
 | `backend`, `gpus` | `gpu`, `all` | `cpu` 后端；GPU 列表如 `0,1,2,3` |
 | `cpu_threads`, `threads_per_voxel`, `voxel_chunk`, `launch_target_ms` | 自动 | 性能参数，不影响结果 |
@@ -181,11 +196,12 @@ python3 tools/gen_material_db.py --add "LuAG:Lu3Al5O12:6.73" --add "Steel:MIX(Fe
    |---|---|---|
    | 140.5 keV，6 mm W 针孔板 (160 mm)，6 mm NaI | 1.005 | 0.05 / 1.06 |
    | 140.5 keV，小准直板 (30 mm)，大晶体阵列 | 1.002 | 0.00 / 1.01 |
-   | 140.5 keV，4 个旋转 + 视野平移，2 层体素 | 1.002–1.010 | 0.01–0.18 / 0.94–1.02 |
+   | 140.5 keV，4 个旋转 + 视野平移，2 层体素 | 1.006–1.011 | 0.06–0.16 / 1.03–1.07 |
    | 511 keV，10 mm W 针孔板 (160 mm)，10 mm LYSO | 1.0005 | 0.22 / 0.97 |
 
-   z 的 rms ≈ 1 说明逐元素在统计误差内一致。140.5 keV 时 MC 比解析高约 0.2–0.5%：把解析内核的晶体
-   子单元从 8×16×8 加密到 24×16×24，差距从 0.53% 降到 0.31%，说明这是解析方法对针孔半影的离散化误差。
+   z 的 rms ≈ 1 说明逐元素在统计误差内一致。140.5 keV 时 MC 比解析高约 0.3–1%：把解析内核的晶体
+   子单元从 8×16×8 加密到 24×16×24，差距从 0.53% 降到 0.31%，说明这是解析方法对针孔半影的离散化误差
+   （两种 MC 抽样方式彼此一致，见“方差缩减”）。
    可用 `tools/compare_sysmat.py` 在你自己的系统上重复。
 3. **物理自检** `tests/test_physics.cpp`：Philox 已知答案向量；Klein–Nishina 角分布 χ²/dof ≈ 0.9；
    Rayleigh 与形状因子表 χ²/dof ≈ 1.0–1.1（表本身与 xraylib DCS_Rayl 相差 < ±2–4%）；
@@ -194,13 +210,28 @@ python3 tools/gen_material_db.py --add "LuAG:Lu3Al5O12:6.73" --add "Steel:MIX(Fe
    ```bash
    cd tests && g++ -O2 -std=c++17 -I.. test_physics.cpp ../mc_host.cpp -o test_physics && ./test_physics ../data/materials.db
    ```
-4. **准直板边缘（511 keV 重要）**：小准直板 (30 mm, 10 mm W) + 60 mm LYSO 阵列时，MC (`absorber`) 只有解析值的
+4. **完整物理过程的独立交叉验证** `tests/reference_mc.py`：另写的 numpy MC（自己的几何与锥形源抽样、
+   Kahn 方法抽样 Klein–Nishina，只共享截面表）模拟单晶体中的多次康普顿散射 + 光电吸收（关闭瑞利与荧光），
+   比较沉积能量在 光电峰 / 单次康普顿区 / 康普顿边与峰之间 / 任意沉积 四个能窗的计数（各 2×10⁷ 光子）：
+
+   | 晶体 | 能量 | 光电峰 | 单次康普顿区 | 边–峰之间 | 任意沉积 |
+   |---|---|---|---|---|---|
+   | NaI 20×10×20 mm | 140.5 keV | 0.9997 | 0.9999 | 0.984 (z −0.7) | 0.9997 |
+   | LYSO 20×15×20 mm | 511 keV | 1.0001 | 0.998 | 0.998 | 0.9996 |
+
+   表中为 MCGen/参考 的比值，所有 |z| ≤ 2.1。
+
+   ```bash
+   make cpu && python3 tests/reference_mc.py --energy 140.5 --material NaI
+   python3 tests/reference_mc.py --energy 511 --material LYSO --thickness 15
+   ```
+5. **准直板边缘（511 keV 重要）**：小准直板 (30 mm, 10 mm W) + 60 mm LYSO 阵列时，MC (`absorber`) 只有解析值的
    75%。按中心射线分类：穿过板前后表面的射线 MC/解析 = 0.97；**从板侧面穿出**的射线解析给出 1.8e-2、MC 为 1.3e-3。
    原因是解析内核对“碰到板”的射线按完整厚度 T/cosθ 衰减（相当于板向外延伸），而完全错过板的射线又被
    视为全挡。用 `shield_outside_collimator = slab` 时，前后表面射线 1.002、侧面射线 1.095，但错过板的射线
    变为 3.2e-3（解析为 0）。140.5 keV 下钨几乎不透明，两者差别可忽略；**511 keV 下请按实际屏蔽选择模式**，
    或让准直板覆盖所有视线。
-5. **能谱**：140.5 keV / NaI / W 针孔板中可见 140.5 keV 光电峰、111.9 keV 碘逃逸峰、59.3 keV W Kα、
+6. **能谱**：140.5 keV / NaI / W 针孔板中可见 140.5 keV 光电峰、111.9 keV 碘逃逸峰、59.3 keV W Kα、
    28–33 keV 碘 K X 射线的晶体间串扰。
 
 > 本仓库在无 GPU 的环境中开发：CUDA 后端已用 nvcc 编译链接，物理与几何代码与 CPU 后端为同一份并已验证，

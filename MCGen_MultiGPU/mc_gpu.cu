@@ -71,6 +71,8 @@ __global__ void mcKernel(Geometry G, Materials M, SimConsts C, int rot, int vSta
     int sub = (int)(tid - (long long)vl * tpv);
     if (vl < nVox) {
         int voxel = vStart + vl;
+        HoleTargets targets;
+        buildHoleTargets(G, C, voxel, rot, targets);
         for (int j = 0; j < bCount; ++j) {
             long long h = (bBase + j) * tpv + sub;
             if (h >= N) break;
@@ -80,7 +82,7 @@ __global__ void mcKernel(Geometry G, Materials M, SimConsts C, int rot, int vSta
             tr.active = trBase.active && voxel == traceVoxel && rot == traceRot && h < traceHist;
             tr.track = (int)h * 8;
             Deposits D;
-            float w = runHistory(G, M, C, voxel, rot, rng, D, tr);
+            float w = runHistory(G, M, C, &targets, voxel, rot, rng, D, tr);
             scoreHistory(G, C, D, w, rng, sum, sum2, (size_t)nVox, vl, sspec);
         }
     }

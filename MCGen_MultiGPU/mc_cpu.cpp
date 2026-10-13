@@ -27,6 +27,8 @@ void runRotationCPU(const Simulation& S, int rot, RotationOutput& out, Progress&
             std::fill(acc.begin(), acc.end(), 0.0);
             std::fill(acc2.begin(), acc2.end(), 0.0);
             bool tracing = v == S.traceVoxel && rot == S.traceRot;
+            HoleTargets targets;
+            buildHoleTargets(S.hg.g, S.C, v, rot, targets);
             if (tracing) traceBuf.assign((size_t)S.traceCapacity * 6, 0.0f);
             for (long long h = 0; h < N; ++h) {
                 Philox rng;
@@ -38,7 +40,7 @@ void runRotationCPU(const Simulation& S, int rot, RotationOutput& out, Progress&
                 tr.count = &traceCount;
                 tr.capacity = S.traceCapacity;
                 Deposits D;
-                float w = runHistory(S.hg.g, S.M, S.C, v, rot, rng, D, tr);
+                float w = runHistory(S.hg.g, S.M, S.C, &targets, v, rot, rng, D, tr);
                 scoreHistory(S.hg.g, S.C, D, w, rng, acc.data(), sum2 ? acc2.data() : (double*)nullptr, (size_t)1, 0,
                              specAcc.data());
             }
