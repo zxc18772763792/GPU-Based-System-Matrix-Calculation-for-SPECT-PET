@@ -4,3 +4,15 @@
 *.ptx
 *.cubin
 *.fatbin
+
+# build outputs
+*.o
+*.obj
+MCGen_MultiGPU/MCGen_MultiGPU
+MCGen_MultiGPU/MCGen_CPU
+MCGen_MultiGPU/tests/test_physics
+PEGen_RayTracing_CircularHole/PEGen_CircularHole
+ScatterGen_*/ScatterGen_CircularHole
+ScatterGen_*/ScatterGen_Collimator
+ScatterGen_*/ScatterGen_Crystal
+__pycache__/
