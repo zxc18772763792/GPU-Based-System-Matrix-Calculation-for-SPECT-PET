@@ -1,0 +1,50 @@
+# MCGen_MultiGPU configuration - Tc-99m, 140.5 keV
+# Usage:  ./MCGen_MultiGPU MC_Config_Tc99m.txt [-key value ...]   (command line overrides this file)
+
+# ---------------------------------------------------------------- inputs
+params_dir          = .               # folder with Params_Collimator/Detector/Image/Physics.dat
+material_db         =                 # empty = data/materials.db next to the executable
+preset              = tc99m           # energy 140.511 keV + 20 % photopeak window (126.46-154.56 keV)
+# energy_keV        = 140.511
+
+# Materials: a name from data/materials.db, "params" (coefficients from the parameter
+# files, legacy E^-3 / Klein-Nishina energy scaling) or "vacuum".
+collimator_material = W               # W | W90Ni7Fe3 | W95Ni3.5Fe1.5 | Pb | Au | Pt | Ta ...
+# collimator_material_layer1 = Pb     # per-layer override (0-based layer index)
+hole_material       = Air
+crystal_material    = NaI             # NaI | CsI | GAGG | CZT | CdTe | LaBr3 | ...
+# crystal_material_flag2 = CsI        # override for crystals with Param_Detector flag == 2
+# density_W         = 18.5            # density override (g/cm3) for any material
+
+# ---------------------------------------------------------------- energy windows
+# "params" = Param_Physics behaviour, "auto" = per crystal (1 -/+ R/2) E0, or lo-hi in keV.
+# Several windows -> one system matrix each, e.g. photopeak + lower scatter window (TEW/DEW):
+windows             = 126.46-154.56, 108.5-126.46
+ewin_mode           = gauss           # gauss (resolution from Param_Detector[10]) | ideal | none
+eres_exponent       = 0.5             # FWHM/E ~ E^-0.5
+# eres              = 0.095           # override the energy resolution of all crystals
+
+# ---------------------------------------------------------------- physics
+physics             = full            # full | primary_pe (reproduces the analytic PE model)
+rayleigh            = 1
+fluorescence        = 1               # K x-rays: W 59-69 keV, Pb 73-87 keV, I 28-33 keV escape
+energy_cutoff_keV   = 10
+shield_outside_collimator = absorber  # absorber | slab (frame of the same material) | none
+
+# ---------------------------------------------------------------- sampling / run
+histories_per_voxel = 1000000
+source_sampling     = uniform         # uniform | center
+direction_sampling  = rect            # rect (importance sampled, unbiased) | iso
+detector_bias       = 0.8
+seed                = 20241221
+backend             = gpu             # gpu | cpu
+gpus                = all             # all | 0,1,2,3
+# rot_begin = 0                       # compute a subset of rotations (e.g. split across machines)
+# rot_end   = 60
+
+# ---------------------------------------------------------------- outputs
+output_dir          = .
+save_components     = 1               # primary / collimator-scatter / inter-crystal-scatter matrices
+save_relerr         = 1               # relative statistical error per element
+trace_voxel         = -2              # -2 = central voxel; -1 = off. Tracks for the Visualizer
+trace_histories     = 300

@@ -1,0 +1,43 @@
+# MCGen_MultiGPU configuration - 511 keV annihilation photons (singles, e.g. F-18 SPECT/PET imaging)
+# Usage:  ./MCGen_MultiGPU MC_Config_511keV.txt [-key value ...]   (command line overrides this file)
+#
+# At 511 keV septal penetration and collimator scatter are large and most interactions in the
+# crystals are Compton scatters, so the full MC matrix differs most from the analytic one here.
+
+# ---------------------------------------------------------------- inputs
+params_dir          = .
+material_db         =
+preset              = 511             # energy 511 keV + 20 % window (459.9-562.1 keV)
+
+collimator_material = W               # dense collimators: W, W95Ni3.5Fe1.5, Au, Pt
+hole_material       = Air
+crystal_material    = LYSO            # LYSO | LSO | BGO | GAGG | CZT ...
+
+# ---------------------------------------------------------------- energy windows
+windows             = 459.9-562.1     # add e.g. 350-650 for a wide window
+ewin_mode           = gauss
+eres_exponent       = 0.5
+
+# ---------------------------------------------------------------- physics
+physics             = full
+rayleigh            = 1
+fluorescence        = 1               # Lu/Bi/Gd K x-rays (54-90 keV) escaping or reabsorbed
+energy_cutoff_keV   = 10
+shield_outside_collimator = absorber  # at 511 keV the plate edges matter: see ReadMe (validation 4)
+yield               = 1.0             # set 1.934 (= 2 x 0.967) for counts per F-18 decay
+
+# ---------------------------------------------------------------- sampling / run
+histories_per_voxel = 1000000
+source_sampling     = uniform
+direction_sampling  = rect
+detector_bias       = 0.7             # keep more samples on the whole plate: penetration/scatter matter
+seed                = 20241221
+backend             = gpu
+gpus                = all
+
+# ---------------------------------------------------------------- outputs
+output_dir          = .
+save_components     = 1
+save_relerr         = 1
+trace_voxel         = -2
+trace_histories     = 300
