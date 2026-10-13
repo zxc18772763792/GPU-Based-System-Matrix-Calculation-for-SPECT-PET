@@ -68,12 +68,12 @@
     for (const v of niceTicks(x0, x1, Math.max(2, Math.floor(w / 90)))) {
       const px = X(v);
       ctx.beginPath(); ctx.moveTo(px, 8); ctx.lineTo(px, h - 26); ctx.stroke();
-      ctx.textAlign = 'center'; ctx.fillText(SV.fmt(v, 3), px, h - 12);
+      if (px > 60 && px < w - 20) { ctx.textAlign = 'center'; ctx.fillText(SV.fmt(v, 3), px, h - 12); }
     }
     for (const v of yTicks || niceTicks(y0, y1, Math.max(2, Math.floor(h / 50)))) {
       const py = Y(v);
       ctx.beginPath(); ctx.moveTo(48, py); ctx.lineTo(w - 8, py); ctx.stroke();
-      ctx.textAlign = 'right'; ctx.fillText(SV.fmt(v, 3), 44, py + 4);
+      if (py > 30 && py < h - 30) { ctx.textAlign = 'right'; ctx.fillText(SV.fmt(v, 3), 44, py + 4); }
     }
     if (labels) {
       ctx.textAlign = 'right'; ctx.fillText(labels[0], w - 10, h - 28);
@@ -83,7 +83,10 @@
 
   // ------------------------------------------------------------------ x-z layout
   class LayoutView {
-    constructor(app) { this.app = app; this.scale = 4; this.cx = 0; this.cz = 0; this.filter = 'all'; this.fitted = false; }
+    // Beam's-eye view: looking along +y (from the FOV towards the detector), x right, z up.
+    // mirror = true looks along -y (from behind the detector): x points left.
+    constructor(app) { this.app = app; this.scale = 4; this.cx = 0; this.cz = 0; this.filter = 'all'; this.fitted = false; this.mirror = false; }
+    get sgn() { return this.mirror ? -1 : 1; }
     fit(w, h) {
       const m = this.app.model;
       if (!m) return;
@@ -93,22 +96,23 @@
       this.cx = (b.max[0] + b.min[0]) / 2; this.cz = (b.max[2] + b.min[2]) / 2;
       this.fitted = true;
     }
-    X(x) { return this.w / 2 + 20 + (x - this.cx) * this.scale; }
+    X(x) { return this.w / 2 + 20 + this.sgn * (x - this.cx) * this.scale; }
     Z(z) { return this.h / 2 - 10 - (z - this.cz) * this.scale; }
-    pan(dx, dy) { this.cx -= dx / this.scale; this.cz += dy / this.scale; }
+    pan(dx, dy) { this.cx -= this.sgn * dx / this.scale; this.cz += dy / this.scale; }
     zoom(f, px, py) {
-      const x = this.cx + (px - this.w / 2 - 20) / this.scale, z = this.cz - (py - this.h / 2 + 10) / this.scale;
+      const [x, z] = this.toWorld(px, py);
       this.scale *= f;
-      this.cx = x - (px - this.w / 2 - 20) / this.scale; this.cz = z + (py - this.h / 2 + 10) / this.scale;
+      this.cx = x - this.sgn * (px - this.w / 2 - 20) / this.scale; this.cz = z + (py - this.h / 2 + 10) / this.scale;
     }
-    toWorld(px, py) { return [this.cx + (px - this.w / 2 - 20) / this.scale, this.cz - (py - this.h / 2 + 10) / this.scale]; }
+    toWorld(px, py) { return [this.cx + this.sgn * (px - this.w / 2 - 20) / this.scale, this.cz - (py - this.h / 2 + 10) / this.scale]; }
     draw(ctx, w, h) {
       this.w = w; this.h = h;
       const m = this.app.model;
       if (!m) return this.app.emptyHint(ctx, w, h);
       if (!this.fitted) this.fit(w, h);
-      const x0 = this.toWorld(0, 0)[0], x1 = this.toWorld(w, 0)[0], z1 = this.toWorld(0, 0)[1], z0 = this.toWorld(0, h)[1];
-      frame(ctx, w, h, x0, x1, z0, z1, (v) => this.X(v), (v) => this.Z(v), ['x (mm)', 'z (mm)']);
+      const xa = this.toWorld(0, 0)[0], xb = this.toWorld(w, 0)[0], z1 = this.toWorld(0, 0)[1], z0 = this.toWorld(0, h)[1];
+      frame(ctx, w, h, Math.min(xa, xb), Math.max(xa, xb), z0, z1, (v) => this.X(v), (v) => this.Z(v),
+        [this.mirror ? '← x (mm)' : 'x (mm) →', 'z (mm) ↑']);
       const showX = this.filter === 'all' || this.filter === 'crystals';
       const sel = this.app.sel;
       // crystals
@@ -134,7 +138,7 @@
         if (this.filter !== 'all' && this.filter !== String(L.index)) continue;
         const lc = SV.catColor(L.index);
         ctx.strokeStyle = SV.rgbCss(lc, 0.9); ctx.lineWidth = 1.5;
-        ctx.strokeRect(this.X(-L.W / 2), this.Z(L.H / 2), L.W * this.scale, L.H * this.scale);
+        ctx.strokeRect(Math.min(this.X(-L.W / 2), this.X(L.W / 2)), this.Z(L.H / 2), L.W * this.scale, L.H * this.scale);
         ctx.fillStyle = SV.rgbCss(lc, 0.55);
         for (let k = 0; k < L.nHoles; k++) {
           const hh = m.holes[L.holeStart + k];
@@ -146,6 +150,9 @@
       // origin
       ctx.strokeStyle = css('--muted'); ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(this.X(0) - 6, this.Z(0)); ctx.lineTo(this.X(0) + 6, this.Z(0)); ctx.moveTo(this.X(0), this.Z(0) - 6); ctx.lineTo(this.X(0), this.Z(0) + 6); ctx.stroke();
+      // viewing direction caption
+      ctx.font = '11px system-ui, sans-serif'; ctx.textAlign = 'right'; ctx.fillStyle = css('--muted');
+      ctx.fillText(this.app.t(this.mirror ? 'layoutViewR' : 'layoutView'), w - 12, 20);
     }
     pick(px, py) {
       const m = this.app.model;
@@ -170,28 +177,46 @@
   SV.LayoutView = LayoutView;
 
   // ------------------------------------------------------------------ voxel image
+  // Orientation modes (app.state.imgOrient):
+  //   phys   : x (ix) to the right, y (iy) up    = seen from +z, same as the 3D "-z" view; detector on top at rotation 0
+  //   numpy  : ix to the right, iy downwards     = imshow(row.reshape(nZ, nY, nX)[iz])
+  //   matlab : iy to the right, ix downwards     = imagesc(reshape(row, nX, nY, nZ)(:,:,iz))
   class ImageView {
     constructor(app) { this.app = app; this.slice = 0; this.off = document.createElement('canvas'); }
-    rect(w, h) {
+    get mode() { return this.app.state.imgOrient || 'phys'; }
+    dims() {
       const I = this.app.model.image;
-      const aw = I.nX * I.wX, ah = I.nY * I.wY;
-      const s = Math.min((w - 130) / aw, (h - 30) / ah);
-      return { x: 60 + (w - 130 - aw * s) / 2, y: 12 + (h - 30 - ah * s) / 2, w: aw * s, h: ah * s };
+      return this.mode === 'matlab' ? { cols: I.nY, rows: I.nX, cw: I.wY, rh: I.wX } : { cols: I.nX, rows: I.nY, cw: I.wX, rh: I.wY };
+    }
+    toCell(ix, iy) {
+      const I = this.app.model.image;
+      return this.mode === 'matlab' ? [iy, ix] : this.mode === 'numpy' ? [ix, iy] : [ix, I.nY - 1 - iy];
+    }
+    fromCell(cx, cy) {
+      const I = this.app.model.image;
+      return this.mode === 'matlab' ? [cy, cx] : this.mode === 'numpy' ? [cx, cy] : [cx, I.nY - 1 - cy];
+    }
+    // screen direction (x right, y down) of a direction (dx, dy) given in voxel x/y
+    screenDir(dx, dy) { return this.mode === 'matlab' ? [dy, dx] : this.mode === 'numpy' ? [dx, dy] : [dx, -dy]; }
+    rect(w, h) {
+      const d = this.dims();
+      const aw = d.cols * d.cw, ah = d.rows * d.rh;
+      const s = Math.min((w - 140) / aw, (h - 44) / ah);
+      return { x: 64 + (w - 140 - aw * s) / 2, y: 22 + (h - 44 - ah * s) / 2, w: aw * s, h: ah * s };
     }
     draw(ctx, w, h) {
       const app = this.app, vv = app.voxValues;
       if (!app.model || !vv) return app.emptyHint(ctx, w, h, app.t('hintImage'));
-      const I = app.model.image;
+      const I = app.model.image, d = this.dims();
       this.slice = SV.clamp(this.slice, 0, I.nZ - 1);
       const n = I.nX * I.nY, base = this.slice * n;
       const sc = SV.makeScale(vv.values.subarray(base, base + n), app.state.log);
-      this.sc = sc;
-      this.off.width = I.nX; this.off.height = I.nY;
-      const octx = this.off.getContext('2d'), im = octx.createImageData(I.nX, I.nY);
+      this.off.width = d.cols; this.off.height = d.rows;
+      const octx = this.off.getContext('2d'), im = octx.createImageData(d.cols, d.rows);
       for (let iy = 0; iy < I.nY; iy++)
         for (let ix = 0; ix < I.nX; ix++) {
           const v = vv.values[base + iy * I.nX + ix], c = SV.cmap(sc.t(v), app.state.cmap);
-          const o = 4 * ((I.nY - 1 - iy) * I.nX + ix);  // y up
+          const [cx, cy] = this.toCell(ix, iy), o = 4 * (cy * d.cols + cx);
           im.data[o] = c[0] * 255; im.data[o + 1] = c[1] * 255; im.data[o + 2] = c[2] * 255; im.data[o + 3] = 255;
         }
       octx.putImageData(im, 0, 0);
@@ -204,15 +229,35 @@
       if (s && s.kind === 'voxel') {
         const p = SV.voxelPos(I, s.index, 0);
         if (p.iz === this.slice) {
+          const [cx, cy] = this.toCell(p.ix, p.iy);
           ctx.strokeStyle = '#ff4060'; ctx.lineWidth = 2;
-          ctx.strokeRect(r.x + p.ix * r.w / I.nX, r.y + (I.nY - 1 - p.iy) * r.h / I.nY, r.w / I.nX, r.h / I.nY);
+          ctx.strokeRect(r.x + cx * r.w / d.cols, r.y + cy * r.h / d.rows, r.w / d.cols, r.h / d.rows);
         }
       }
-      // labels + colourbar
-      ctx.fillStyle = css('--muted'); ctx.font = '11px system-ui, sans-serif'; ctx.textAlign = 'left';
+      // axis arrows
+      ctx.fillStyle = css('--muted'); ctx.font = '11px system-ui, sans-serif';
+      const lab = this.mode === 'matlab' ? ['iy (y) →', 'ix (x) ↓'] : this.mode === 'numpy' ? ['ix (x) →', 'iy (y) ↓'] : ['x (ix) →', 'y (iy) ↑'];
+      ctx.textAlign = 'center'; ctx.fillText(lab[0], r.x + r.w / 2, r.y + r.h + 14);
+      ctx.save(); ctx.translate(r.x - 12, r.y + r.h / 2); ctx.rotate(-Math.PI / 2); ctx.fillText(lab[1], 0, 0); ctx.restore();
+      // corner index labels: where voxel (0, 0) is
+      const [c0x, c0y] = this.toCell(0, 0);
+      ctx.textAlign = c0x === 0 ? 'left' : 'right';
+      ctx.fillText('(0,0)', c0x === 0 ? r.x : r.x + r.w, c0y === 0 ? r.y - 5 : r.y + r.h + 14);
+      // direction of the detector (+y in the world) for the current rotation, in voxel coordinates
+      const a = app.state.rot * I.angle, [sx, sy] = this.screenDir(Math.sin(a), Math.cos(a));
+      const ccx = r.x + r.w / 2, ccy = r.y + r.h / 2, L = 0.42 * Math.min(r.w, r.h);
+      const ex = ccx + sx * L, ey = ccy + sy * L;
+      ctx.strokeStyle = 'rgba(255,255,255,0.75)'; ctx.fillStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(ccx, ccy); ctx.lineTo(ex, ey); ctx.stroke();
+      const ang = Math.atan2(sy, sx);
+      ctx.beginPath(); ctx.moveTo(ex, ey);
+      ctx.lineTo(ex - 9 * Math.cos(ang - 0.4), ey - 9 * Math.sin(ang - 0.4));
+      ctx.lineTo(ex - 9 * Math.cos(ang + 0.4), ey - 9 * Math.sin(ang + 0.4)); ctx.closePath(); ctx.fill();
+      ctx.textAlign = 'center';
+      ctx.fillText(app.t('detDir', app.state.rot), SV.clamp(ex + sx * 14, r.x, r.x + r.w), SV.clamp(ey + sy * 14 + 4, r.y + 8, r.y + r.h));
+      // caption + colourbar
+      ctx.fillStyle = css('--muted'); ctx.textAlign = 'left';
       ctx.fillText(`${vv.label}  ·  z = ${this.slice}/${I.nZ - 1}`, 8, h - 6);
-      ctx.save(); ctx.translate(r.x - 10, r.y + r.h / 2); ctx.rotate(-Math.PI / 2); ctx.textAlign = 'center'; ctx.fillText('y →', 0, 0); ctx.restore();
-      ctx.textAlign = 'center'; ctx.fillText('x →', r.x + r.w / 2, r.y + r.h + 14);
       const bx = w - 58, by = 14, bh = h - 40;
       for (let k = 0; k < bh; k++) { ctx.fillStyle = SV.rgbCss(SV.cmap(1 - k / bh, app.state.cmap)); ctx.fillRect(bx, by + k, 12, 1); }
       ctx.fillStyle = css('--muted'); ctx.textAlign = 'left';
@@ -223,16 +268,17 @@
     voxelAt(px, py) {
       const app = this.app;
       if (!app.model || !app.voxValues) return -1;
-      const I = app.model.image, r = this.rect(this.host.cv.clientWidth, this.host.cv.clientHeight);
-      const ix = Math.floor((px - r.x) / r.w * I.nX), iyf = Math.floor((py - r.y) / r.h * I.nY);
-      if (ix < 0 || iyf < 0 || ix >= I.nX || iyf >= I.nY) return -1;
-      return this.slice * I.nX * I.nY + (I.nY - 1 - iyf) * I.nX + ix;
+      const I = app.model.image, d = this.dims(), r = this.rect(this.host.cv.clientWidth, this.host.cv.clientHeight);
+      const cx = Math.floor((px - r.x) / r.w * d.cols), cy = Math.floor((py - r.y) / r.h * d.rows);
+      if (cx < 0 || cy < 0 || cx >= d.cols || cy >= d.rows) return -1;
+      const [ix, iy] = this.fromCell(cx, cy);
+      return this.slice * I.nX * I.nY + iy * I.nX + ix;
     }
     hover(px, py) {
       const v = this.voxelAt(px, py);
       if (v < 0) return null;
-      const p = SV.voxelPos(this.app.model.image, v, 0);
-      return `voxel ${v} (${p.ix}, ${p.iy}, ${p.iz})<br>${SV.fmt(this.app.voxValues.values[v], 5)}`;
+      const p = SV.voxelPos(this.app.model.image, v, this.app.state.rot);
+      return `voxel ${v}  (ix ${p.ix}, iy ${p.iy}, iz ${p.iz})<br>x, y = ${SV.fmt(p.local[0], 4)}, ${SV.fmt(p.local[1], 4)} mm<br>${SV.fmt(this.app.voxValues.values[v], 5)}`;
     }
     click(px, py) { const v = this.voxelAt(px, py); if (v >= 0) this.app.select({ kind: 'voxel', index: v }); }
   }

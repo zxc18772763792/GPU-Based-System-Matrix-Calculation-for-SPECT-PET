@@ -71,14 +71,21 @@
           <label class="inline"><input type="checkbox" id="clipFlip"> <span data-i18n="flip">反向</span></label></span></label>
         <label class="field"><span><span data-i18n="rotation">旋转位置</span> <b id="rotLabel">0</b></span>
           <input type="range" id="rotIndex" min="0" max="0" step="1" value="0"></label>
-        <div class="btnrow">
-          <button class="btn sm" data-view="iso" data-i18n="vIso">等轴</button>
-          <button class="btn sm" data-view="front" data-i18n="vFront">正视</button>
-          <button class="btn sm" data-view="top" data-i18n="vTop">俯视</button>
-          <button class="btn sm" data-view="side" data-i18n="vSide">侧视</button>
+        <div class="field"><span data-i18n="views">视角（视线方向）</span></div>
+        <div class="btnrow views">
+          <button class="btn sm" data-view="iso" data-i18n="vIso" data-i18n-title="vIsoT">等轴</button>
+          <button class="btn sm" data-view="beam" data-i18n="vBeam" data-i18n-title="vBeamT">沿 +y</button>
+          <button class="btn sm" data-view="beamR" data-i18n="vBeamR" data-i18n-title="vBeamRT">沿 −y</button>
+          <button class="btn sm" data-view="axial" data-i18n="vAxial" data-i18n-title="vAxialT">沿 −z</button>
+          <button class="btn sm" data-view="side" data-i18n="vSide" data-i18n-title="vSideT">沿 −x</button>
           <button class="btn sm" id="fitBtn" data-i18n="vFit">适配</button>
-          <label class="inline small"><input type="checkbox" id="orthoCam"> <span data-i18n="ortho">正交</span></label>
         </div>
+        <div class="row2">
+          <label class="field inline"><span data-i18n="upAxis">竖直轴</span>
+            <select id="upAxis"><option value="z">z</option><option value="y">y</option></select></label>
+          <label class="field inline"><input type="checkbox" id="orthoCam"> <span data-i18n="ortho">正交</span></label>
+        </div>
+        <div class="muted small" id="viewNote"></div>
       </section>
 
       <section class="card" id="secSysmat">
@@ -116,9 +123,9 @@
     <div class="center">
       <div class="viewport" id="viewport">
         <canvas id="gl"></canvas>
+        <canvas id="ov3d" class="overlay3d"></canvas>
         <div class="legend" id="legend"></div>
         <div class="hint" id="hint3d" data-i18n="dropHint">拖入参数文件 (Params_*.dat)、系统矩阵 (*.sysmat) 或 MC 输出，或点击“示例几何”。</div>
-        <div class="axes-key"><span class="ax x">x</span><span class="ax y">y</span><span class="ax z">z</span></div>
       </div>
       <div class="panel2d">
         <div class="tabs" role="tablist">
@@ -126,8 +133,16 @@
           <button class="tab" data-tab="image" data-i18n="tabImage">体素图像</button>
           <button class="tab" data-tab="spectrum" data-i18n="tabSpectrum">能谱</button>
           <span class="spacer"></span>
-          <span class="tabctl" id="ctlLayout"><select id="layoutFilter"></select></span>
-          <span class="tabctl" id="ctlImage" hidden><span data-i18n="slice">切片</span> <input type="range" id="sliceIdx" min="0" max="0" value="0"></span>
+          <span class="tabctl" id="ctlLayout">
+            <label class="inline"><input type="checkbox" id="layoutMirror"> <span data-i18n="layoutMirror">从探测器背面看 (−y)</span></label>
+            <select id="layoutFilter"></select></span>
+          <span class="tabctl" id="ctlImage" hidden>
+            <select id="imgOrient">
+              <option value="phys" data-i18n="oPhys">物理：x→ y↑</option>
+              <option value="numpy" data-i18n="oNumpy">numpy：ix→ iy↓</option>
+              <option value="matlab" data-i18n="oMatlab">MATLAB：iy→ ix↓</option>
+            </select>
+            <span data-i18n="slice">切片</span> <input type="range" id="sliceIdx" min="0" max="0" value="0"></span>
         </div>
         <div class="plotwrap"><canvas id="c2d"></canvas><div class="tooltip" id="tip2d" hidden></div></div>
       </div>
@@ -144,6 +159,13 @@
           <li data-i18n="help1">左键拖动：旋转；右键/Shift：平移；滚轮：缩放</li>
           <li data-i18n="help2">单击：选中元素；双击：以其为中心</li>
           <li data-i18n="help3">体素图像中单击体素：显示其在各探测器上的投影</li>
+        </ul>
+        <h3 data-i18n="secCoords" style="margin-top:10px">坐标约定</h3>
+        <ul class="small muted">
+          <li data-i18n="coord1">+y：从视野指向准直器和探测器（射束方向）</li>
+          <li data-i18n="coord2">z：视野旋转轴（轴向）；视野绕 +z 逆时针旋转 index × Param_Image[7]</li>
+          <li data-i18n="coord3">晶体绕 y 轴转 Param_Detector[11]：x′ = x cosθ − z sinθ，z′ = x sinθ + z cosθ</li>
+          <li data-i18n="coord4">参数文件中的 y 加上 FOV2Collimator0 (Param_Image[11]) 即世界坐标</li>
         </ul>
       </section>
     </aside>

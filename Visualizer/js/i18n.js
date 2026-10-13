@@ -34,7 +34,29 @@
     clip: ['剖切面', 'Section plane'],
     flip: ['反向', 'Flip'],
     rotation: ['旋转位置', 'Rotation'],
-    vIso: ['等轴', 'Iso'], vFront: ['正视', 'Front'], vTop: ['俯视', 'Top'], vSide: ['侧视', 'Side'], vFit: ['适配', 'Fit'],
+    views: ['视角（视线方向）', 'View (viewing direction)'],
+    vIso: ['等轴', 'Iso'], vFit: ['适配', 'Fit'],
+    vBeam: ['沿 +y', 'Along +y'], vBeamR: ['沿 −y', 'Along −y'], vAxial: ['沿 −z', 'Along −z'], vSide: ['沿 −x', 'Along −x'],
+    vIsoT: ['等轴测视图', 'Isometric view'],
+    vBeamT: ['从视野看向探测器：x→ z↑（同布局图）', 'From the FOV towards the detector: x→ z↑ (= layout map)'],
+    vBeamRT: ['从探测器背面看：x← z↑（同布局图镜像）', 'From behind the detector: x← z↑ (= mirrored layout map)'],
+    vAxialT: ['从 +z 俯视：x→ y↑（同体素图像“物理”方向）', 'From +z: x→ y↑ (= voxel image, physical)'],
+    vSideT: ['从 +x 看：y→ z↑（射束从左到右）', 'From +x: y→ z↑ (beam left to right)'],
+    viewNote: ['屏幕：右 = {0}，上 = {1}', 'Screen: right = {0}, up = {1}'],
+    upAxis: ['竖直轴', 'Vertical axis'],
+    layoutMirror: ['从探测器背面看 (−y)', 'View from behind (−y)'],
+    layoutView: ['视线 +y：从视野看向探测器（x→ z↑）', 'Looking along +y, from the FOV to the detector (x→ z↑)'],
+    layoutViewR: ['视线 −y：从探测器背面看（x← z↑）', 'Looking along −y, from behind the detector (x← z↑)'],
+    oPhys: ['物理：x→ y↑（从 +z 看）', 'Physical: x→ y↑ (from +z)'],
+    oNumpy: ['numpy：ix→ iy↓', 'numpy: ix→ iy↓'],
+    oMatlab: ['MATLAB：iy→ ix↓', 'MATLAB: iy→ ix↓'],
+    detDir: ['探测器 (+y, 旋转 {0})', 'detector (+y, rot. {0})'],
+    secCoords: ['坐标约定', 'Coordinates'],
+    coord1: ['+y：从视野指向准直器和探测器（射束方向）', '+y: from the FOV towards the collimator and detector (beam direction)'],
+    coord2: ['z：视野旋转轴（轴向）；视野绕 +z 逆时针旋转 index × Param_Image[7]', 'z: rotation (axial) axis; the FOV turns counter-clockwise about +z by index × Param_Image[7]'],
+    coord3: ['晶体绕 y 轴转 Param_Detector[11]：x′ = x cosθ − z sinθ，z′ = x sinθ + z cosθ', 'Crystals turn about y by Param_Detector[11]: x′ = x cosθ − z sinθ, z′ = x sinθ + z cosθ'],
+    coord4: ['参数文件中的 y 加上 FOV2Collimator0 (Param_Image[11]) 即世界坐标', 'World y = parameter-file y + FOV2Collimator0 (Param_Image[11])'],
+    axisLen: ['坐标轴长 {0} mm', 'Axis length {0} mm'],
     ortho: ['正交', 'Ortho'],
     secSysmat: ['系统矩阵', 'System matrix'],
     sysmatFile: ['文件', 'File'],
@@ -131,6 +153,7 @@
   };
   SV.applyI18n = function (root) {
     (root || document).querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = SV.t(el.dataset.i18n); });
+    (root || document).querySelectorAll('[data-i18n-title]').forEach((el) => { el.title = SV.t(el.dataset.i18nTitle); });
     document.documentElement.lang = lang === 'zh' ? 'zh' : 'en';
     document.title = SV.t('title');
   };

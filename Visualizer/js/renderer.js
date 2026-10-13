@@ -117,7 +117,10 @@
       this.clip = [0, 0, 0, -1];
       this.sel = { batch: null, id: -1 };
       this.bg = [0.06, 0.07, 0.09];
-      this.cam = { target: [0, 0, 0], dist: 300, theta: -2.2, phi: 0.45, fov: 40 * Math.PI / 180, ortho: false };
+      // orbit camera: spherical angles around the chosen vertical axis ('z' or 'y')
+      this.cam = { target: [0, 0, 0], dist: 300, theta: -2.2, phi: 0.45, fov: 40 * Math.PI / 180, ortho: false, up: 'z' };
+      this.axisLength = 20;   // world length of the axis lines (labelled on the overlay)
+      this.overlay = null;    // optional 2D canvas for the orientation gizmo and axis labels
       this.dirty = true;
       this._loop = this._loop.bind(this);
       requestAnimationFrame(this._loop);
@@ -197,14 +200,24 @@
     setClip(plane) { this.clip = plane || [0, 0, 0, -1]; this.dirty = true; }
 
     // ---------------------------------------------------------------- camera
+    // right-handed orbit basis (e1, e2, eu): eu is the screen-vertical world axis
+    basis() {
+      return this.cam.up === 'y' ? { e1: [0, 0, 1], e2: [1, 0, 0], eu: [0, 1, 0] } : { e1: [1, 0, 0], e2: [0, 1, 0], eu: [0, 0, 1] };
+    }
     eye() {
-      const c = this.cam, cp = Math.cos(c.phi);
-      return V.add(c.target, [c.dist * cp * Math.cos(c.theta), c.dist * cp * Math.sin(c.theta), c.dist * Math.sin(c.phi)]);
+      const c = this.cam, cp = Math.cos(c.phi), B = this.basis();
+      const d = V.add(V.add(V.scale(B.e1, cp * Math.cos(c.theta)), V.scale(B.e2, cp * Math.sin(c.theta))), V.scale(B.eu, Math.sin(c.phi)));
+      return V.add(c.target, V.scale(d, c.dist));
+    }
+    // camera frame: f forward, r screen-right, u screen-up (world vectors)
+    frame() {
+      const f = V.norm(V.sub(this.cam.target, this.eye())), r = V.norm(V.cross(f, this.basis().eu));
+      return { f, r, u: V.cross(r, f) };
     }
     viewProj() {
       const c = this.cam, w = this.canvas.width, h = this.canvas.height, aspect = w / Math.max(1, h);
       const eye = this.eye();
-      const view = mat4.lookAt(eye, c.target, [0, 0, 1]);
+      const view = mat4.lookAt(eye, c.target, this.basis().eu);
       let proj;
       if (c.ortho) {
         const hh = c.dist * Math.tan(c.fov / 2);
@@ -219,10 +232,36 @@
       c.dist = r / Math.sin(c.fov / 2) * 0.8;
       this.dirty = true;
     }
-    view(name) {
-      const c = this.cam;
-      const views = { iso: [-2.2, 0.45], front: [-Math.PI / 2, 0.0], top: [-Math.PI / 2, 1.55], side: [Math.PI, 0.0], back: [Math.PI / 2, 0.0] };
-      [c.theta, c.phi] = views[name] || views.iso;
+    // Preset views. Each one states the viewing direction and matches a 2D view:
+    //   beam  : look along +y (from the FOV towards the detector), x right, z up  = layout map
+    //   beamR : look along -y (from behind the detector),           x left,  z up  = mirrored layout map
+    //   axial : look along -z (from +z),                            x right, y up  = voxel image ("physical")
+    //   side  : look along -x (from +x),                            y right, z up
+    static get VIEWS() {
+      return {
+        iso: { up: 'z', theta: -2.2, phi: 0.45 },
+        isoY: { up: 'y', theta: 0.75, phi: 0.5 },
+        beam: { up: 'z', theta: -Math.PI / 2, phi: 0 },
+        beamR: { up: 'z', theta: Math.PI / 2, phi: 0 },
+        axial: { up: 'y', theta: 0, phi: 0 },
+        side: { up: 'z', theta: 0, phi: 0 },
+      };
+    }
+    setView(name) {
+      const v = Renderer.VIEWS[name] || Renderer.VIEWS.iso;
+      Object.assign(this.cam, v);
+      this.dirty = true;
+      if (this.onViewChange) this.onViewChange(name);
+    }
+    view(name) { this.setView(name); }
+    // change the vertical axis but keep looking from (about) the same side
+    setUp(up) {
+      if (up === this.cam.up) return;
+      const d = V.norm(V.sub(this.eye(), this.cam.target));
+      this.cam.up = up;
+      const B = this.basis();
+      this.cam.phi = SV.clamp(Math.asin(SV.clamp(V.dot(d, B.eu), -1, 1)), -1.55, 1.55);
+      this.cam.theta = Math.atan2(V.dot(d, B.e2), V.dot(d, B.e1));
       this.dirty = true;
     }
     // ray through canvas pixel (CSS px)
@@ -230,7 +269,7 @@
       const rect = this.canvas.getBoundingClientRect();
       const x = (2 * (px - rect.left)) / rect.width - 1, y = 1 - (2 * (py - rect.top)) / rect.height;
       const c = this.cam, eye = this.eye();
-      const f = V.norm(V.sub(c.target, eye)), r = V.norm(V.cross(f, [0, 0, 1])), u = V.cross(r, f);
+      const { f, r, u } = this.frame();
       const aspect = rect.width / Math.max(1, rect.height), t = Math.tan(c.fov / 2);
       if (c.ortho) {
         const hh = c.dist * t;
@@ -254,7 +293,7 @@
         drag.x = e.clientX; drag.y = e.clientY;
         const c = this.cam;
         if (drag.pan) {
-          const eye = this.eye(), f = V.norm(V.sub(c.target, eye)), r = V.norm(V.cross(f, [0, 0, 1])), u = V.cross(r, f);
+          const { r, u } = this.frame();
           const s = (2 * c.dist * Math.tan(c.fov / 2)) / cv.clientHeight;
           c.target = V.add(c.target, V.add(V.scale(r, -dx * s), V.scale(u, dy * s)));
         } else {
@@ -325,6 +364,54 @@
       }
       gl.depthMask(true);
       gl.bindVertexArray(null);
+      this.drawOverlay(vp);
+      if (this.onRender) this.onRender();
+    }
+
+    // ---------------------------------------------------------------- overlay
+    // Orientation gizmo (bottom right) that turns with the camera, plus labels at the
+    // tips of the 3D axis lines, so the direction of every axis is always readable.
+    drawOverlay(vp) {
+      const ov = this.overlay;
+      if (!ov) return;
+      const dpr = Math.min(window.devicePixelRatio || 1, 2), W = ov.clientWidth, H = ov.clientHeight;
+      if (ov.width !== Math.round(W * dpr) || ov.height !== Math.round(H * dpr)) { ov.width = Math.round(W * dpr); ov.height = Math.round(H * dpr); }
+      const ctx = ov.getContext('2d');
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, W, H);
+      const AX = [['x', [1, 0, 0], '#ff6b6b'], ['y', [0, 1, 0], '#51cf66'], ['z', [0, 0, 1], '#4ea1ff']];
+      ctx.font = '600 12px system-ui, sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      // labels at the 3D axis tips
+      if (this.isVisible('axes')) {
+        const proj = (p) => {
+          const x = vp[0] * p[0] + vp[4] * p[1] + vp[8] * p[2] + vp[12], y = vp[1] * p[0] + vp[5] * p[1] + vp[9] * p[2] + vp[13];
+          const w = vp[3] * p[0] + vp[7] * p[1] + vp[11] * p[2] + vp[15];
+          return w > 1e-6 ? [(x / w * 0.5 + 0.5) * W, (0.5 - y / w * 0.5) * H] : null;
+        };
+        const o = proj([0, 0, 0]);
+        for (const [n, a, col] of AX) {
+          const q = proj(V.scale(a, this.axisLength * 1.12));
+          if (!q || !o || Math.hypot(q[0] - o[0], q[1] - o[1]) < 6) continue;
+          ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(14,17,22,0.9)'; ctx.strokeText('+' + n, q[0], q[1]);
+          ctx.fillStyle = col; ctx.fillText('+' + n, q[0], q[1]);
+        }
+      }
+      // gizmo
+      const { f, r, u } = this.frame(), cx = W - 52, cy = H - 52, L = 34;
+      ctx.fillStyle = 'rgba(21,26,33,0.8)';
+      ctx.beginPath(); ctx.arc(cx, cy, 46, 0, 2 * Math.PI); ctx.fill();
+      const items = AX.map(([n, a, col]) => ({ n, col, sx: V.dot(a, r), sy: V.dot(a, u), depth: V.dot(a, f) }));
+      items.sort((p, q) => q.depth - p.depth);   // far axes first
+      for (const it of items) {
+        const ex = cx + it.sx * L, ey = cy - it.sy * L, away = it.depth > 0.2;
+        ctx.strokeStyle = it.col; ctx.globalAlpha = away ? 0.45 : 1; ctx.lineWidth = 2.5;
+        ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(ex, ey); ctx.stroke();
+        ctx.fillStyle = it.col;
+        ctx.beginPath(); ctx.arc(ex, ey, 8, 0, 2 * Math.PI); ctx.fill();
+        ctx.fillStyle = '#0e1116'; ctx.fillText(it.n, ex, ey + 0.5);
+        ctx.globalAlpha = 1;
+      }
     }
   }
   SV.Renderer = Renderer;

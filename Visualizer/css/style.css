@@ -107,8 +107,8 @@ table.kv td:last-child { text-align: right; font-variant-numeric: tabular-nums; 
 .legend:empty { display: none; }
 .legend .bar { width: 160px; height: 9px; border-radius: 2px; margin: 4px 0 2px; }
 .legend .lab { display: flex; justify-content: space-between; color: var(--muted); font-variant-numeric: tabular-nums; }
-.axes-key { position: absolute; right: 10px; bottom: 10px; display: flex; gap: 6px; font-size: 11px; font-weight: 600; pointer-events: none; }
-.axes-key .x { color: #ff6b6b; } .axes-key .y { color: #51cf66; } .axes-key .z { color: #4ea1ff; }
+.overlay3d { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.btnrow.views .btn.active { border-color: var(--accent); color: var(--accent); }
 
 /* ---------------------------------------------------------------- 2D */
 .panel2d { display: flex; flex-direction: column; min-height: 0; background: var(--panel); }

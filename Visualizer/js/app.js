@@ -153,9 +153,15 @@
     buildVoxelCloud();
   }
 
+  function niceLength(v) {
+    const p = Math.pow(10, Math.floor(Math.log10(v)));
+    return [1, 2, 5, 10].map((k) => k * p).filter((x) => x <= v).pop() || p;
+  }
   function buildAxes() {
     const m = App.model, b = m.bounds;
-    const L = 0.12 * Math.max(b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]);
+    const L = niceLength(0.25 * Math.max(b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]));
+    App.renderer.axisLength = L;
+    $('viewNote').dataset.axis = L;
     const pos = new Float32Array([0, 0, 0, L, 0, 0, 0, 0, 0, 0, L, 0, 0, 0, 0, 0, 0, L]);
     const col = new Float32Array([1, 0.42, 0.42, 1, 1, 0.42, 0.42, 1, 0.32, 0.81, 0.4, 1, 0.32, 0.81, 0.4, 1, 0.31, 0.63, 1, 1, 0.31, 0.63, 1, 1]);
     App.renderer.setLines('axes', pos, col, { visible: $('showAxes').checked, noClip: true });
@@ -305,6 +311,20 @@
     return best ? best.sel : null;
   }
 
+  // 3D cross-hair at the selected voxel (current rotation)
+  function buildSelMarker() {
+    const R = App.renderer, m = App.model, sel = App.sel;
+    if (!m || !sel || sel.kind !== 'voxel') { R.removeLines('selmark'); return; }
+    const I = m.image, p = SV.voxelPos(I, sel.index, App.state.rot).world, h = 1.5 * Math.max(I.wX, I.wY, I.wZ, 0.5);
+    const pos = [], col = [];
+    for (const a of [0, 1, 2]) {
+      const q0 = p.slice(), q1 = p.slice();
+      q0[a] -= h; q1[a] += h;
+      pos.push(...q0, ...q1); col.push(1, 0.25, 0.38, 1, 1, 0.25, 0.38, 1);
+    }
+    R.setLines('selmark', new Float32Array(pos), new Float32Array(col), { noClip: true });
+  }
+
   App.select = function (sel) {
     App.sel = sel;
     const R = App.renderer;
@@ -321,6 +341,7 @@
       $('voxIdx').value = sel.index;
       if (curSysmat()) showCol().catch(fail);
     }
+    buildSelMarker();
     showInfo();
     App.plot.redraw();
   };
@@ -547,7 +568,7 @@
       App.renderer = new SV.Renderer($('gl'));
     } catch (e) {
       $('hint3d').textContent = 'WebGL2 is required: ' + e.message;
-      App.renderer = { setInstances() {}, setColors() {}, setLines() {}, removeLines() {}, setVisible() {}, isVisible() { return false; }, setSelection() {}, setClip() {}, fit() {}, view() {}, clip: [0, 0, 0, -1], cam: {}, removeBatch() {}, setTransparent() {} };
+      App.renderer = { setInstances() {}, setColors() {}, setLines() {}, removeLines() {}, setVisible() {}, isVisible() { return false; }, setSelection() {}, setClip() {}, fit() {}, view() {}, setView() {}, setUp() {}, clip: [0, 0, 0, -1], cam: {}, removeBatch() {}, setTransparent() {} };
     }
     App.plot = new SV.Plot2D($('c2d'), $('tip2d'));
     App.views = { layout: new SV.LayoutView(App), image: new SV.ImageView(App), spectrum: new SV.SpectrumView(App) };
@@ -599,9 +620,10 @@
       App.state.rot = parseInt(e.target.value, 10);
       const I = App.model ? App.model.image : null;
       $('rotLabel').textContent = I ? `${App.state.rot} (${SV.fmt(App.state.rot * I.angle * 180 / Math.PI, 4)}°)` : '0';
-      if (App.model) { buildFov(); showInfo(); }
+      if (App.model) { buildFov(); buildSelMarker(); showInfo(); App.plot.redraw(); }
     });
-    document.querySelectorAll('[data-view]').forEach((b) => b.addEventListener('click', () => App.renderer.view(b.dataset.view)));
+    document.querySelectorAll('[data-view]').forEach((b) => b.addEventListener('click', () => App.renderer.setView(b.dataset.view)));
+    $('upAxis').addEventListener('change', (e) => { App.renderer.setUp(e.target.value); markView(null); });
     $('fitBtn').addEventListener('click', () => App.model && App.renderer.fit(App.model.bounds.min, App.model.bounds.max));
     $('orthoCam').addEventListener('change', (e) => { App.renderer.cam.ortho = e.target.checked; App.renderer.dirty = true; });
 
@@ -623,6 +645,13 @@
 
     // 3D picking / hover
     const R = App.renderer;
+    R.overlay = $('ov3d');
+    R.onViewChange = (name) => { $('upAxis').value = R.cam.up; markView(name); };
+    R.onRender = updateViewNote;
+    $('layoutMirror').addEventListener('change', (e) => { App.views.layout.mirror = e.target.checked; App.plot.redraw(); });
+    App.state.imgOrient = SV.storage.get('imgOrient', 'phys');
+    $('imgOrient').value = App.state.imgOrient;
+    $('imgOrient').addEventListener('change', (e) => { App.state.imgOrient = e.target.value; SV.storage.set('imgOrient', e.target.value); App.plot.redraw(); });
     R.onClick = (e) => { const s = pick3D(e); App.select(s); };
     $('gl').addEventListener('dblclick', () => { const c = selCentre(App.sel); if (c) { R.cam.target = c; R.dirty = true; } });
     let hoverT = 0;
@@ -652,6 +681,23 @@
       status(t('stServer', info.root));
       if (auto.length) loadSources(auto.map((f) => new SV.RemoteSource(f.path, f.size))).catch(fail);
     });
+  }
+
+  // which world axis points right / up on screen (updated after every 3D render)
+  function updateViewNote() {
+    const R = App.renderer;
+    if (!R.frame) return;
+    const { r, u } = R.frame();
+    const name = (v) => {
+      const k = [0, 1, 2].reduce((a, b) => (Math.abs(v[b]) > Math.abs(v[a]) ? b : a), 0), c = v[k];
+      const n = (c > 0 ? '+' : '−') + 'xyz'[k];
+      return Math.abs(c) > 0.985 ? n : Math.abs(c) > 0.7 ? '≈' + n : '—';
+    };
+    const L = $('viewNote').dataset.axis;
+    $('viewNote').textContent = t('viewNote', name(r), name(u)) + (L ? ' · ' + t('axisLen', L) : '');
+  }
+  function markView(name) {
+    document.querySelectorAll('[data-view]').forEach((b) => b.classList.toggle('active', b.dataset.view === name));
   }
 
   function buildModelFilterLabels() {
