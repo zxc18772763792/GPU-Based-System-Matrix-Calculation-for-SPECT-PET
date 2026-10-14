@@ -1256,7 +1256,7 @@ __global__ void crystalScatterSysMatCuda(float* dst,
 						float length = 0;
 						float comptonConeAngle = calculateConeAngle(xImage, yImage, zImage, x_scatter, y_scatter, z_scatter, xDetector, yDetector, zDetector);
 						float scatterEnergy = calculateScatterEnergy(comptonConeAngle, target_PE_Energy);
-						float energy_resolution_detector_scatterphoton = energy_resolution_detector_targetPE * sqrt(scatterEnergy / target_PE_Energy);
+						float energy_resolution_detector_scatterphoton = energy_resolution_detector_targetPE * sqrt(target_PE_Energy / scatterEnergy); // FWHM/E ~ E^-1/2: worse at lower energy
 
 						//  The probability that a Compton scatterred photon being detected within the energy window of detector unit
 
@@ -1752,7 +1752,7 @@ __global__ void collimatorScatterSysMatCuda(float* dst,
 
 						float comptonConeAngle = calculateConeAngle(xImage, yImage, zImage, x_scatter, y_scatter, z_scatter, xDetector, yDetector, zDetector);
 						float scatterEnergy = calculateScatterEnergy(comptonConeAngle, target_PE_Energy);
-						float energy_resolution_detector_scatterphoton = energy_resolution_detector_targetPE * sqrt(scatterEnergy / target_PE_Energy);
+						float energy_resolution_detector_scatterphoton = energy_resolution_detector_targetPE * sqrt(target_PE_Energy / scatterEnergy); // FWHM/E ~ E^-1/2: worse at lower energy
 
 						//  The probability that a Compton scatterred photon being detected within the energy window of detector unit
 
@@ -2010,7 +2010,7 @@ __global__ void geometryRelationShip_Collimator2Crystal(unsigned int* dst_relati
 
 
 
-int scatter(float* parameter_Collimator, float* parameter_Detector, float* parameter_Image, float* parameter_Physics,float* PE_SysMat,const char* FnameGeoCrystal, const char* FnameGeoCollimator, float* dst, int cuda_id)
+int scatter(float* parameter_Collimator, float* parameter_Detector, float* parameter_Image, float* parameter_Physics,float* PE_SysMat,const char* FnameGeoCrystal, const char* FnameGeoCollimator, float* dst, int cuda_id, float* dstCrystal, float* dstCollimator)
 {
 
 	cout << "Get into scatter function" << endl;
@@ -2351,10 +2351,12 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 	cout << "Time of  collimatorScatterSysMatCuda function: " << duration_CollimatorScatterSysMatCuda.count() / 1000.0 / 60.0 << " min" << endl;
 
 	cout << "########################" << endl;
-	for (int i = 0; i < numProjectionSingle * numImagebin* numRotation; i++)
+	for (long long i = 0; i < (long long)numProjectionSingle * numImagebin; i++) // one rotation per call (dst already points at it)
 	{
 		dst[i] = h_Collimator_SysMat[i] + h_Crystal_SysMat[i];
 	}
+	if (dstCrystal) memcpy(dstCrystal, h_Crystal_SysMat, sizeof(float) * numProjectionSingle * numImagebin);
+	if (dstCollimator) memcpy(dstCollimator, h_Collimator_SysMat, sizeof(float) * numProjectionSingle * numImagebin);
 	// Release Sources
 	cudaFreeHost(h_parameter_Collimator);
 	cudaFreeHost(h_parameter_Detector);

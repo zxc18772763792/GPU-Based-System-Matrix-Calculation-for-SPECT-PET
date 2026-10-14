@@ -10,6 +10,7 @@
 //                -GeoCrystal <path_to_CrystalGeometryRelationship>
 //                -GeoCollimator <path_to_CollimatorGeometryRelationship>
 //                -cuda <cuda_device_id>
+//                -components   (also write Scatter_Crystal_SysMat_... and Scatter_Collimator_SysMat_...)
 //
 // Author: Xingchun Zheng @ tsinghua university
 // Last Modified: 2024/12/21
@@ -102,6 +103,7 @@ int main(int argc, char* argv[])
 	string FnameGeoCrystal = "GeometryRelationShip_Crystal2Crystal"; 
 	string FnameGeoCollimator = "GeometryRelationShip_Collimator2Crystal";
 	int cuda_id = 0; 
+	bool writeComponents = false;
 
 	for (int i = 1; i < argc; ++i)
 	{
@@ -122,6 +124,10 @@ int main(int argc, char* argv[])
 			parameter_Physics[9] = 0;
 			i++;
 		}
+		else if (strcmp(argv[i], "-components") == 0)
+		{
+			writeComponents = true;
+		}
 		else if (strcmp(argv[i], "-cuda") == 0 && i + 1 < argc)
 		{
 			cuda_id = atoi(argv[i + 1]);
@@ -129,7 +135,7 @@ int main(int argc, char* argv[])
 		}
 		else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0)
 		{
-			cout << "Usage: " << argv[0] << " [-PE PE_SysMat_path] [-GeoCrystal GeometryRelationShip_Crystal2Crystal_path] [-GeoCollimator GeometryRelationShip_Collimator2Crystal_path] [-cuda GPU_ID]" << endl;
+			cout << "Usage: " << argv[0] << " [-PE PE_SysMat_path] [-GeoCrystal GeometryRelationShip_Crystal2Crystal_path] [-GeoCollimator GeometryRelationShip_Collimator2Crystal_path] [-cuda GPU_ID] [-components]" << endl;
 			return 0;
 		}
 		else
@@ -169,6 +175,8 @@ int main(int argc, char* argv[])
 	auto start_scatter = std::chrono::high_resolution_clock::now();
 
 	float* out = new float[numProjectionSingle * numImagebin * numRotation]();
+	float* outCrystal = writeComponents ? new float[numProjectionSingle * numImagebin * numRotation]() : 0;
+	float* outCollimator = writeComponents ? new float[numProjectionSingle * numImagebin * numRotation]() : 0;
 
 	printf("FOV dimension : %d %d %d\n", numImageVoxelX, numImageVoxelY, numImageVoxelZ);
 	printf("FOV Voxel Size(mm) : %f %f %f\n", widthImageVoxelX, widthImageVoxelY, widthImageVoxelZ);
@@ -185,7 +193,9 @@ int main(int argc, char* argv[])
 
 		parameter_Image[20] = float(idxRotation);
 
-		int q = scatter(parameter_Collimator, parameter_Detector, parameter_Image, parameter_Physics, PE_SysMat, FnameGeoCrystal.c_str(), FnameGeoCollimator.c_str(), out + idxRotation * numProjectionSingle * numImagebin, cuda_id);
+		int q = scatter(parameter_Collimator, parameter_Detector, parameter_Image, parameter_Physics, PE_SysMat + idxRotation * numProjectionSingle * numImagebin, FnameGeoCrystal.c_str(), FnameGeoCollimator.c_str(), out + idxRotation * numProjectionSingle * numImagebin, cuda_id,
+			writeComponents ? outCrystal + idxRotation * numProjectionSingle * numImagebin : 0,
+			writeComponents ? outCollimator + idxRotation * numProjectionSingle * numImagebin : 0);
 
 		printf("numImagebin = %d\n", q);
 	}
@@ -207,6 +217,21 @@ int main(int argc, char* argv[])
 		cout << "########################" << endl;
 		cout << "Compton Scatter Sysmat written." << endl;
 		cout << "########################" << endl;
+	}
+	if (writeComponents)
+	{
+		const char* names[2] = { "Scatter_Crystal_SysMat_shift_%f_%f_%f.sysmat", "Scatter_Collimator_SysMat_shift_%f_%f_%f.sysmat" };
+		float* parts[2] = { outCrystal, outCollimator };
+		for (int k = 0; k < 2; k++)
+		{
+			char Fname[2048];
+			sprintf(Fname, names[k], shiftFOVX, shiftFOVY, shiftFOVZ);
+			FILE* fpc = fopen(Fname, "wb+");
+			if (fpc == 0) { puts("error"); exit(0); }
+			fwrite(parts[k], sizeof(float), numProjectionSingle * numImagebin * numRotation, fpc);
+			fclose(fpc);
+			cout << "Component written: " << Fname << endl;
+		}
 	}
 	if (parameter_Physics[3] == 1) 
 	{
