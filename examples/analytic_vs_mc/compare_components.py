@@ -132,7 +132,7 @@ def main():
     ap.add_argument("--runs", default="mc_single,mc_model,mc_full", help="MC output prefixes (runs with components)")
     ap.add_argument("--md", help="write the Markdown report here")
     ap.add_argument("--json", help="write all numbers here")
-    ap.add_argument("--svg", help="flood images (sum over voxels) per component")
+    ap.add_argument("--svg", help="flood images (sum over voxels) per component, analytic vs the first MC run")
     a = ap.parse_args()
     d = a.run_dir
     nP, nI, nR, xtal = params(d)
@@ -200,11 +200,11 @@ def main():
                    row("collimator scatter vs MC colscatter", rr["collimator"]),
                    row("PE + scatter vs MC total", rr["total"]),
                    "", f"scatter / primary: analytic {sa:.4f}, MC {sm:.4f}\n"]
-            if a.svg and k == 0 and run == a.runs.split(",")[-1]:
+            if a.svg and k == 0 and run == a.runs.split(",")[0]:      # first run = the reference of the model
                 fl = lambda X: X.sum(axis=(0, 2))
-                panels = [("analytic PE", fl(AN["pe"])), ("MC primary", fl(M["primary"])),
-                          ("analytic crystal scatter", fl(an["crystal"])), ("MC crystal scatter", fl(M["xtalscatter"])),
-                          ("analytic collimator scatter", fl(an["collimator"])), ("MC collimator scatter", fl(M["colscatter"]))]
+                panels = [("analytic PE", fl(AN["pe"])), (f"{run} primary", fl(M["primary"])),
+                          ("analytic crystal scatter", fl(an["crystal"])), (f"{run} crystal scatter", fl(M["xtalscatter"])),
+                          ("analytic collimator scatter", fl(an["collimator"])), (f"{run} collimator scatter", fl(M["colscatter"]))]
                 panels = [(f"{t}\nsum {X.sum():.3e}", X) for t, X in panels]
                 svg_flood(a.svg, xtal, panels, 2)
 
