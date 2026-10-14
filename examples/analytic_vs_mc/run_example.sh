@@ -80,9 +80,10 @@ fi
 echo "== Monte Carlo ($MODE, $NH histories per voxel)"
 CFG=$HERE/MC_example.txt
 cd "$OUT"
-# 1) analytic-equivalent physics: only photoelectric absorption, ideal window -> checks the PE kernel
-"$MC" "$CFG" $MCARGS $MATS -output_prefix mc_pe -physics primary_pe -ewin_mode ideal -windows params \
-      -save_components 0 -histories_per_voxel "$NH" > mc_pe.log
+# 1) analytic-equivalent physics: coefficients from the parameter files (no Rayleigh), a photon is
+#    counted only if its first interaction is photoelectric, ideal window -> checks the PE kernel
+"$MC" "$CFG" $MCARGS -output_prefix mc_pe -collimator_material params -crystal_material params -hole_material vacuum \
+      -physics primary_pe -ewin_mode ideal -windows params -save_components 0 -histories_per_voxel "$NH" > mc_pe.log
 # 2) Compton + photoelectric only, coefficients and E^-3 / Klein-Nishina scaling from the parameter
 #    files, no Rayleigh, no fluorescence: the physics the analytic scatter models assume
 "$MC" "$CFG" $MCARGS -output_prefix mc_model -collimator_material params -crystal_material params -hole_material vacuum \
