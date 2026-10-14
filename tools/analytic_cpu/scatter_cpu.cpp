@@ -4,7 +4,7 @@
 // with the bitmaps of geometryRelationShip_Crystal2Crystal / _Collimator2Crystal.  The host logic of
 // scatter() / main() is replicated (per rotation, PE matrix of the same rotation).
 //
-//   scatter_cpu <params_dir> <PE.sysmat> [out_dir] [-model v2|legacy] [-skip crystal|shell|bulk|collimator]
+//   scatter_cpu <params_dir> <PE.sysmat> [out_dir] [-model v2|legacy] [-skip crystal|shell|bulk|collimator] [-holes a:b]
 //   writes the same files as "ScatterGen_CircularHole -components" into out_dir (default params_dir):
 //   Scatter_SysMat_shift_<x>_<y>_<z>.sysmat (sum), Scatter_Crystal_SysMat_..., Scatter_Collimator_SysMat_...
 #include <chrono>
@@ -21,6 +21,7 @@ int main(int argc, char** argv) {
     std::vector<std::string> pos;
     int model = 2;
     bool skipXtal = false, skipShell = false, skipBulk = false;     // for validation runs
+    int hole0 = 0, hole1 = 1 << 30;                                 // -holes a:b (shell term of holes a..b-1 only)
     for (int a = 1; a < argc; ++a) {
         std::string s = argv[a];
         if (s == "-model" && a + 1 < argc) {
@@ -28,6 +29,8 @@ int main(int argc, char** argv) {
             if (m == "legacy") model = 1;
             else if (m == "v2") model = 2;
             else { fprintf(stderr, "-model must be v2 or legacy\n"); return 1; }
+        } else if (s == "-holes" && a + 1 < argc) {
+            if (sscanf(argv[++a], "%d:%d", &hole0, &hole1) != 2) { fprintf(stderr, "-holes a:b\n"); return 1; }
         } else if (s == "-skip" && a + 1 < argc) {
             std::string m = argv[++a];
             if (m == "crystal") skipXtal = true;
@@ -111,7 +114,7 @@ int main(int argc, char** argv) {
             threadIdx.x = threadIdx.y = threadIdx.z = 0;
             for (int v = 0; v < nI; ++v) {
                 if (model == 2) {
-                    for (int h = 0; h < (skipShell ? 0 : layers.totalHoles); ++h) {
+                    for (int h = hole0; h < (skipShell ? 0 : std::min(hole1, layers.totalHoles)); ++h) {
                         blockIdx.x = (unsigned)row; blockIdx.y = (unsigned)v; blockIdx.z = (unsigned)h;
                         collimatorScatterShellV2(dC, col.data(), xi.data(), det.data(), img.data(), phy.data(), layers, hash,
                                                  nb.data(), nP, nI, 0, layers.totalHoles);

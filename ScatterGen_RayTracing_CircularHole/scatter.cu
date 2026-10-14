@@ -2057,10 +2057,10 @@ __global__ void geometryRelationShip_Collimator2Crystal(unsigned int* dst_relati
 #define S2_SH_NPSI 12         // collimator shell: points around the hole ...
 #endif
 #ifndef S2_SH_NY
-#define S2_SH_NY 6            //   ... along the hole ...
+#define S2_SH_NY 3            //   ... along the hole (x3: clustered at the front face, the back face, uniform) ...
 #endif
 #ifndef S2_SH_ND
-#define S2_SH_ND 3            //   ... and into the wall (quantiles of the expected attenuation)
+#define S2_SH_ND 3            //   ... and into the wall (x2: quantiles of the expected attenuation and of 1/16 of it)
 #endif
 #ifndef S2_SH_MFP
 #define S2_SH_MFP 5.0f        //   shell thickness = min(S2_SH_MFP mean free paths at E0, S2_SH_MAX mm)
@@ -2076,6 +2076,9 @@ __global__ void geometryRelationShip_Collimator2Crystal(unsigned int* dst_relati
 #endif
 #ifndef S2_BK_SKIP_MUT
 #define S2_BK_SKIP_MUT 15.0f  //   no bulk term for layers with mu*T above this (opaque: < e^-15)
+#endif
+#ifndef S2_PRUNE
+#define S2_PRUNE 1e-5f        // collimator scatter: skip scatter points whose incoming weight is below S2_PRUNE x the largest
 #endif
 #ifndef S2_PE_REL
 #define S2_PE_REL 1e-7f       // crystal scatter: skip (j, v) with PE[j,v] < S2_PE_REL x max(PE)
@@ -2463,14 +2466,38 @@ __global__ void crystalScatterV2(float* dst, const float* xi, const float* det, 
     atomicAdd(&dst[i * nI + v], PC * acc / wsum);
 }
 
-// Common part of the collimator kernels: a scatter point r in layer m with volume dV
-__device__ inline float s2colPoint(S2V r, float dV, S2V vox, int m, const float* col, const S2Col& L, const S2Hash& H,
-                                   const S2Phys& P, const S2Box& I, S2Mu muI, const S2AttCol& att) {
+// Collimator kernels: Compton interactions per emitted photon in the volume dV at r (layer m)
+__device__ inline float s2colSource(S2V r, float dV, S2V vox, int m, const float* col, const S2Col& L, const S2Hash& H) {
     S2V d = s2sub(r, vox);
-    float dist2 = s2dot(d, d);
-    float base = dV * L.mu[m].c * expf(-s2colTau(col, L, H, vox, r, 1.0f, 1.0f)) / (4.0f * (float)M_PI * dist2);
-    if (base < 1e-30f) return 0.0f;
-    return base * s2toCrystal(r, s2mul(d, 1.0f / sqrtf(dist2)), P, I, muI, att);
+    return dV * L.mu[m].c * expf(-s2colTau(col, L, H, vox, r, 1.0f, 1.0f)) / (4.0f * (float)M_PI * s2dot(d, d));
+}
+
+// Shell around a hole: scatter point (iy, ip, id) and its volume. Along the hole most of the scatter
+// that escapes comes from within ~1/mu of the front face (beam hitting the rim) and of the back face
+// (scattered photon leaving through it): y nodes from three densities (exponential from each face,
+// uniform).  Into the wall: quantiles of exp(-kappa*delta), kappa = attenuation per unit depth of the
+// incoming and the scattered photon estimated at the wall surface, and of exp(-kappa/16*delta) for
+// photons that reach the wall less obliquely (front-face rim).  Each node is weighted by
+// 1 / (sum of the densities), so no part of the shell depends on one density alone.
+struct S2Shell { float xh, zh, R, y1, y2, mu0, dmax; };
+__device__ inline void s2shellPoint(const S2Shell& g, int iy, int ip, int id, S2V vox, S2V target, S2V& r, float& dV, float& dl) {
+    float T = g.y2 - g.y1, Pf = 1.0f - expf(-g.mu0 * T);
+    int comp = iy / S2_SH_NY;
+    float qy = ((iy % S2_SH_NY) + 0.5f) / S2_SH_NY;
+    float y = comp == 0 ? g.y1 - logf(1.0f - qy * Pf) / g.mu0 : (comp == 1 ? g.y2 + logf(1.0f - qy * Pf) / g.mu0 : g.y1 + qy * T);
+    float dy = 1.0f / (S2_SH_NY * (g.mu0 * (expf(-g.mu0 * (y - g.y1)) + expf(-g.mu0 * (g.y2 - y))) / Pf + 1.0f / T));
+    float dpsi = 2.0f * (float)M_PI / S2_SH_NPSI;
+    float psi = (ip + 0.5f) * dpsi, cp = cosf(psi), sp = sinf(psi);
+    S2V n = s2v(cp, 0.0f, sp), r0 = s2v(g.xh + g.R * cp, y, g.zh + g.R * sp);
+    S2V a = s2sub(r0, vox), b = s2sub(target, r0);
+    float ci = fmaxf(fabsf(s2dot(n, a)) / s2len(a), 0.05f), co = fmaxf(fabsf(s2dot(n, b)) / s2len(b), 0.05f);
+    float k1 = fmaxf(g.mu0 / ci + g.mu0 / co, 1.0f / g.dmax), k2 = fmaxf(k1 / 16.0f, 1.0f / g.dmax);
+    float P1 = 1.0f - expf(-k1 * g.dmax), P2 = 1.0f - expf(-k2 * g.dmax);
+    float qd = ((id % S2_SH_ND) + 0.5f) / S2_SH_ND;
+    dl = id < S2_SH_ND ? -logf(1.0f - qd * P1) / k1 : -logf(1.0f - qd * P2) / k2;
+    float wd = 1.0f / (S2_SH_ND * (k1 * expf(-k1 * dl) / P1 + k2 * expf(-k2 * dl) / P2));
+    r = s2v(g.xh + (g.R + dl) * cp, y, g.zh + (g.R + dl) * sp);
+    dV = (g.R + dl) * dpsi * dy * wd;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2498,35 +2525,29 @@ __global__ void collimatorScatterShellV2(float* dst, const float* col, const flo
     S2AttCol att = { col, xi, det, L, H, nbList + (long long)S2_MAXNB * i };
 
     const float* hp = col + 100 + 9 * h;
-    float xh = hp[0], zh = hp[3], R = hp[4];
-    float y1 = hp[1] + L.fov2col, y2 = hp[2] + L.fov2col;
-    float mu0 = L.mu[m].pe + L.mu[m].c;
-    float dmax = fminf(S2_SH_MFP / mu0, S2_SH_MAX);
-    float dpsi = 2.0f * (float)M_PI / S2_SH_NPSI, dy = (y2 - y1) / S2_SH_NY;
-    float acc = 0.0f;
-    for (int iy = 0; iy < S2_SH_NY; ++iy) {
-        float y = y1 + (iy + 0.5f) * dy;
-        for (int ip = 0; ip < S2_SH_NPSI; ++ip) {
-            float psi = (ip + 0.5f) * dpsi, cp = cosf(psi), sp = sinf(psi);
-            S2V n = s2v(cp, 0.0f, sp);
-            S2V r0 = s2v(xh + R * cp, y, zh + R * sp);
-            // depth points: quantiles of exp(-kappa*delta), kappa = attenuation per unit depth of the
-            // incoming and the scattered photon (estimated at the wall surface)
-            S2V a = s2sub(r0, vox), b = s2sub(I.c, r0);
-            float ci = fmaxf(fabsf(s2dot(n, a)) / s2len(a), 0.05f), co = fmaxf(fabsf(s2dot(n, b)) / s2len(b), 0.05f);
-            float kap = fmaxf(mu0 / ci + mu0 / co, 1.0f / dmax);
-            float Pd = 1.0f - expf(-kap * dmax);
-            for (int id = 0; id < S2_SH_ND; ++id) {
-                float qd = (id + 0.5f) / S2_SH_ND;
-                float dl = -logf(1.0f - qd * Pd) / kap;
-                float wd = Pd / (kap * S2_SH_ND) * expf(kap * dl);       // integral weight of this depth
-                S2V r = s2v(xh + (R + dl) * cp, y, zh + (R + dl) * sp);
-                if (fabsf(r.x) > L.hx[m] || fabsf(r.z) > L.hz[m]) continue;
-                if (s2wallDist(col, L, H, m, r, h, dl) < dl) continue;    // closer to another hole
-                acc += s2colPoint(r, (R + dl) * dpsi * dy * wd, vox, m, col, L, H, P, I, muI, att);
-            }
-        }
-    }
+    S2Shell g;
+    g.xh = hp[0]; g.zh = hp[3]; g.R = hp[4];
+    g.y1 = hp[1] + L.fov2col; g.y2 = hp[2] + L.fov2col;
+    g.mu0 = L.mu[m].pe + L.mu[m].c;
+    g.dmax = fminf(S2_SH_MFP / g.mu0, S2_SH_MAX);
+    const int NY = 3 * S2_SH_NY, NP = S2_SH_NPSI, ND = 2 * S2_SH_ND;
+    // pass 1: largest incoming weight; pass 2: scattered photons from the points that matter
+    float wmax = 0.0f, acc = 0.0f;
+    for (int pass = 0; pass < 2; ++pass)
+        for (int iy = 0; iy < NY; ++iy)
+            for (int ip = 0; ip < NP; ++ip)
+                for (int id = 0; id < ND; ++id) {
+                    S2V r;
+                    float dV, dl;
+                    s2shellPoint(g, iy, ip, id, vox, I.c, r, dV, dl);
+                    if (fabsf(r.x) > L.hx[m] || fabsf(r.z) > L.hz[m]) continue;
+                    if (s2wallDist(col, L, H, m, r, h, dl) < dl) continue;    // closer to another hole
+                    float w = s2colSource(r, dV, vox, m, col, L, H);
+                    if (pass == 0) { wmax = fmaxf(wmax, w); continue; }
+                    if (w <= S2_PRUNE * wmax) continue;
+                    S2V din = s2sub(r, vox);
+                    acc += w * s2toCrystal(r, s2mul(din, 1.0f / s2len(din)), P, I, muI, att);
+                }
     atomicAdd(&dst[i * nI + v], acc);
 }
 
@@ -2573,16 +2594,21 @@ __global__ void collimatorScatterBulkV2(float* dst, const float* col, const floa
     }
     float dmax = fminf(S2_SH_MFP / mu0, S2_SH_MAX);
     float dx = (x1 - x0) / S2_BK_N, dz = (z1 - z0) / S2_BK_N, dyy = T / S2_BK_NY;
-    float acc = 0.0f;
-    for (int a = 0; a < S2_BK_N; ++a)
-        for (int c = 0; c < S2_BK_N; ++c) {
-            float x = x0 + (a + 0.5f) * dx, z = z0 + (c + 0.5f) * dz;
-            if (L.nh[m] > 0 && s2wallDist(col, L, H, m, s2v(x, ym, z), -1, dmax) < dmax) continue;   // hole or shell
-            for (int b = 0; b < S2_BK_NY; ++b) {
-                S2V r = s2v(x, L.y1[m] + (b + 0.5f) * dyy, z);
-                acc += s2colPoint(r, dx * dz * dyy, vox, m, col, L, H, P, I, muI, att);
+    float wmax = 0.0f, acc = 0.0f;
+    for (int pass = 0; pass < 2; ++pass)
+        for (int a = 0; a < S2_BK_N; ++a)
+            for (int c = 0; c < S2_BK_N; ++c) {
+                float x = x0 + (a + 0.5f) * dx, z = z0 + (c + 0.5f) * dz;
+                if (L.nh[m] > 0 && s2wallDist(col, L, H, m, s2v(x, ym, z), -1, dmax) < dmax) continue;   // hole or shell
+                for (int b = 0; b < S2_BK_NY; ++b) {
+                    S2V r = s2v(x, L.y1[m] + (b + 0.5f) * dyy, z);
+                    float w = s2colSource(r, dx * dz * dyy, vox, m, col, L, H);
+                    if (pass == 0) { wmax = fmaxf(wmax, w); continue; }
+                    if (w <= S2_PRUNE * wmax) continue;
+                    S2V din = s2sub(r, vox);
+                    acc += w * s2toCrystal(r, s2mul(din, 1.0f / s2len(din)), P, I, muI, att);
+                }
             }
-        }
     atomicAdd(&dst[i * nI + v], acc);
 }
 
