@@ -95,13 +95,22 @@ This project provides a GPU-based framework for calculating system matrices esse
      -GeoCrystal <path_to_CrystalGeometryRelationship> \
      -GeoCollimator <path_to_CollimatorGeometryRelationship> \
      -cuda <cuda_device_id> \
-     [-components]
+     [-components] [-model v2|legacy]
    ```
 
    Replace placeholders with the actual paths and CUDA device ID. With `-components` the crystal-scatter
    and collimator-scatter parts are also written separately (`Scatter_Crystal_SysMat_shift_*.sysmat`,
    `Scatter_Collimator_SysMat_shift_*.sysmat`). The PE file name written by PEGen ends in `_v3.sysmat`,
    so pass it with `-PE`.
+
+   The default scatter model (`-model v2`) integrates the single Compton scatter over the volume where
+   it happens: over the whole scatter crystal (weighted by the attenuation of the incoming beam) for
+   inter-crystal scatter, and over a thin shell around every collimator hole plus the rest of the plate
+   for collimator scatter, with exact solid angles of the crystal faces, Klein–Nishina angles and
+   energies, and attenuation of the scattered photon in the crystals and the collimator. Its reference is
+   the first-order Monte Carlo of `MCGen_MultiGPU` (`physics = single_scatter`), see
+   [`examples/analytic_vs_mc`](examples/analytic_vs_mc/ReadMe.md). `-model legacy` runs the previous
+   kernels (one scatter point per crystal or hole).
 
 ### (Optional) Calculate Inter-Crystal Primary Compton System Matrix
 

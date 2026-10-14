@@ -51,7 +51,7 @@ enum EventClass { kPrimary = 0, kCollimatorScatter = 1, kCrystalScatter = 2 };
 enum VertexType { kVtxEmit = 0, kVtxPhoto = 1, kVtxCompton = 2, kVtxRayleigh = 3,
                   kVtxEscape = 4, kVtxFluoEmit = 5, kVtxCutoff = 6, kVtxKilled = 7 };
 enum WindowMode { kWinGauss = 0, kWinIdeal = 1, kWinNone = 2 };
-enum FlagBits { kFlagCollimator = 1 };
+enum FlagBits { kFlagCollimator = 1, kFlagXtalScatter = 2, kFlagScattered = 4 };
 
 struct V3 { float x, y, z; };
 MC_HD V3 make3(float x, float y, float z) { V3 v; v.x = x; v.y = y; v.z = z; return v; }
@@ -189,6 +189,7 @@ struct SimConsts {
     float holeBias;                    // mixture weight of the hole-aperture component
     float tgtMargin;                   // aperture square half size = r * (1 + tgtMargin)
     int primaryOnly;                   // 1: analytic-equivalent mode (any scatter kills, no fluo)
+    int singleScatter;                 // 1: first-order scatter reference (one Compton, PE scoring only)
     int fluo;
     float eCut;
     // detector response
@@ -548,16 +549,22 @@ MC_HD void transport(const Geometry& G, const Materials& M, const SimConsts& C,
                     }
                 }
             }
-            if (kind == 2) addDeposit(D, idx, eLocal, classOf(ph, idx));
+            // single-scatter mode: absorption in the crystal where the photon scattered belongs to
+            // no analytic term (the analytic PE matrix counts photoelectric first interactions only)
+            bool sameXtal = C.singleScatter && (ph.flags & kFlagXtalScatter) && ph.firstXtal == idx;
+            if (kind == 2 && !sameXtal) addDeposit(D, idx, eLocal, classOf(ph, idx));
             tr.vertex(ph.p, ph.E, kVtxPhoto);
             return;
         }
         if (C.primaryOnly) { tr.vertex(ph.p, ph.E, kVtxKilled); return; }
+        // single-scatter mode: a second scatter or any Rayleigh scatter ends the history
+        if (C.singleScatter && ((ph.flags & kFlagScattered) || r > pe + inc)) { tr.vertex(ph.p, ph.E, kVtxKilled); return; }
 
         if (r <= pe + inc) {                                    // Compton
             float cosT;
             float E1 = sampleKleinNishina(ph.E, rng, cosT);
-            if (kind == 2) addDeposit(D, idx, ph.E - E1, classOf(ph, idx));
+            if (kind == 2 && !C.singleScatter) addDeposit(D, idx, ph.E - E1, classOf(ph, idx));
+            ph.flags |= kFlagScattered | (kind == 2 ? kFlagXtalScatter : 0);
             setDir(ph, rotateDir(ph.d, cosT, 2.0f * kPi * rng.uniform()));
             setEnergy(M, ph, E1);
             tr.vertex(ph.p, E1, kVtxCompton);
@@ -567,7 +574,7 @@ MC_HD void transport(const Geometry& G, const Materials& M, const SimConsts& C,
             tr.vertex(ph.p, ph.E, kVtxRayleigh);
         }
         if (ph.E < C.eCut) {
-            if (kind == 2) addDeposit(D, idx, ph.E, classOf(ph, idx));
+            if (kind == 2 && !C.singleScatter) addDeposit(D, idx, ph.E, classOf(ph, idx));
             tr.vertex(ph.p, ph.E, kVtxCutoff);
             return;
         }

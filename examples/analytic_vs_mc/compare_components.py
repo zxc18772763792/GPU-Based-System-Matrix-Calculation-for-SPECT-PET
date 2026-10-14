@@ -127,8 +127,9 @@ def svg_flood(path, xtal, panels, ncol):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("run_dir")
+    ap.add_argument("--scatter-dir", help="directory with the analytic scatter matrices (default: run_dir)")
     ap.add_argument("--wide", help="directory with the analytic scatter for MC window 1")
-    ap.add_argument("--runs", default="mc_model,mc_full", help="MC output prefixes (full physics runs)")
+    ap.add_argument("--runs", default="mc_single,mc_model,mc_full", help="MC output prefixes (runs with components)")
     ap.add_argument("--md", help="write the Markdown report here")
     ap.add_argument("--json", help="write all numbers here")
     ap.add_argument("--svg", help="flood images (sum over voxels) per component")
@@ -138,8 +139,9 @@ def main():
     shp = (nR, nP, nI)
 
     pe = find(d, "PE_SysMat_shift_*_v3.sysmat") or find(d, "PE_SysMat_shift_*.sysmat")
-    cr = find(d, "Scatter_Crystal_SysMat_shift_*.sysmat")
-    co = find(d, "Scatter_Collimator_SysMat_shift_*.sysmat")
+    sd = a.scatter_dir or d
+    cr = find(sd, "Scatter_Crystal_SysMat_shift_*.sysmat")
+    co = find(sd, "Scatter_Collimator_SysMat_shift_*.sysmat")
     if not (pe and cr and co):
         sys.exit("analytic matrices missing (PE_SysMat_*, Scatter_Crystal_SysMat_*, Scatter_Collimator_SysMat_*)")
     AN = {"pe": load(pe, shp), "crystal": load(cr, shp), "collimator": load(co, shp)}

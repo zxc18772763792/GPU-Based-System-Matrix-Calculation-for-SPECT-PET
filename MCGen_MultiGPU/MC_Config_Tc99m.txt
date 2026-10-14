@@ -25,7 +25,7 @@ eres_exponent       = 0.5             # FWHM/E ~ E^-0.5
 # eres              = 0.095           # override the energy resolution of all crystals
 
 # ---------------------------------------------------------------- physics
-physics             = full            # full | primary_pe (reproduces the analytic PE model)
+physics             = full            # full | primary_pe (analytic PE model) | single_scatter (analytic scatter model v2)
 rayleigh            = 1
 fluorescence        = 1               # K x-rays: W 59-69 keV, Pb 73-87 keV, I 28-33 keV escape
 energy_cutoff_keV   = 10

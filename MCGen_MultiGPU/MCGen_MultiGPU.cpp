@@ -92,7 +92,7 @@ int main(int argc, char* argv[]) {
     printf("Window model         : %s (resolution ~ E^-%.2f)\n",
            C.winMode == kWinGauss ? "gaussian" : C.winMode == kWinIdeal ? "ideal" : "none", C.eresExp);
     printf("Physics              : %s, Rayleigh %s, fluorescence %s, cut %.1f keV\n",
-           C.primaryOnly ? "primary_pe (analytic-equivalent)" : "full",
+           C.primaryOnly ? "primary_pe (analytic-equivalent)" : C.singleScatter ? "single_scatter (analytic first-order scatter)" : "full",
            S.cfg.integer("rayleigh", 1) ? "on" : "off", C.fluo ? "on" : "off", C.eCut);
     if (C.dirRect) {
         printf("Source               : %s in voxel, importance-sampled directions (detector_bias %.2f",
@@ -279,7 +279,7 @@ int main(int argc, char* argv[]) {
             fprintf(f, "%s{\"lo\":%.4f,\"hi\":%.4f,\"per_crystal\":%s}", k ? "," : "", C.winLo[k], C.winHi[k], C.winAuto[k] ? "true" : "false");
         fprintf(f, "],\n  \"window_mode\": \"%s\",\n", C.winMode == kWinGauss ? "gauss" : C.winMode == kWinIdeal ? "ideal" : "none");
         fprintf(f, "  \"physics\": \"%s\",\n  \"rayleigh\": %s,\n  \"fluorescence\": %s,\n",
-                C.primaryOnly ? "primary_pe" : "full", S.cfg.integer("rayleigh", 1) ? "true" : "false", C.fluo ? "true" : "false");
+                C.primaryOnly ? "primary_pe" : C.singleScatter ? "single_scatter" : "full", S.cfg.integer("rayleigh", 1) ? "true" : "false", C.fluo ? "true" : "false");
         fprintf(f, "  \"direction_sampling\": \"%s\",\n  \"detector_bias\": %.3f,\n  \"source_sampling\": \"%s\",\n",
                 C.dirRect ? "rect" : "iso", C.detBias, C.srcUniform ? "uniform" : "center");
         fprintf(f, "  \"hole_bias\": %.3f,\n  \"hole_target_layer\": %d,\n", C.holeBias, S.hg.g.tgtLayer);

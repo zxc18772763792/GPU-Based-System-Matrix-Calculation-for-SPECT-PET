@@ -12,6 +12,8 @@
 #include <device_launch_parameters.h>
 #include <vector>
 #include <chrono> 
+#include <algorithm>
+#include <cstring>
 
 #include "scatter.h"
 using namespace std;
@@ -2010,7 +2012,677 @@ __global__ void geometryRelationShip_Collimator2Crystal(unsigned int* dst_relati
 
 
 
-int scatter(float* parameter_Collimator, float* parameter_Detector, float* parameter_Image, float* parameter_Physics,float* PE_SysMat,const char* FnameGeoCrystal, const char* FnameGeoCollimator, float* dst, int cuda_id, float* dstCrystal, float* dstCollimator)
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// Scatter model v2 (default; "-model legacy" selects the kernels above)
+//
+// First-order (single Compton) scatter, integrated over the volume where the scatter happens.
+//  * Crystal scatter (crystalScatterV2): the Compton interactions of the beam from voxel v in
+//    crystal j (total probability PE[j,v] * mu_C/mu_PE) are spread over a grid of points filling j,
+//    weighted by the attenuation of the incoming beam inside j.  From every point the scattered
+//    photon is followed to patches of the faces of detector crystal i that it can see (exact
+//    rectangle solid angles, Klein-Nishina angular distribution and energy per patch), attenuated
+//    in j itself and in the crystals in between, and photo-absorbed in i.
+//  * Collimator scatter: scatter points fill the collimator material.  collimatorScatterShellV2
+//    integrates a thin shell around every hole (all of the scatter of an opaque plate comes from
+//    there, mostly from the walls hit by the beam inside the hole), collimatorScatterBulkV2 the rest
+//    of the plate (scatter of photons that penetrate it, important at 511 keV).  Incoming and
+//    scattered photons are attenuated through all collimator layers and their holes.
+//  The scattered photon is counted if it is photo-absorbed in i (the definition of the PE matrix),
+//  with the Gaussian energy-window probability of i at its energy E' (FWHM/E ~ E^-1/2).
+//  Attenuation coefficients at E': photoelectric ~ E^-3, Compton ~ Klein-Nishina total cross section
+//  (the same scaling as MCGen_MultiGPU with material "params", so "physics = single_scatter" of the
+//  Monte Carlo is an exact reference for this model).
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// Quadrature settings (can be overridden with -D at compile time)
+#ifndef S2_XT_GRID
+#define S2_XT_GRID 0.25f      // crystal scatter: scatter-point spacing <= S2_XT_GRID x distance of the crystal centres
+#endif
+#ifndef S2_XT_NXZ
+#define S2_XT_NXZ 4           //   at most this many points across the scatter crystal (x, z) ...
+#endif
+#ifndef S2_XT_NY
+#define S2_XT_NY 12           //   ... and along its thickness (y)
+#endif
+#ifndef S2_PATCH
+#define S2_PATCH 0.5f         // face patches: patch size <= S2_PATCH x distance from the scatter point to the face
+#endif
+#ifndef S2_PATCH_MAX
+#define S2_PATCH_MAX 8        //   at most this many patches per face edge
+#endif
+#ifndef S2_CHORD_N
+#define S2_CHORD_N 4          //   chord through the crystal and shadowing: at least S2_CHORD_N^2 entry points per face
+#endif
+#ifndef S2_SH_NPSI
+#define S2_SH_NPSI 12         // collimator shell: points around the hole ...
+#endif
+#ifndef S2_SH_NY
+#define S2_SH_NY 6            //   ... along the hole ...
+#endif
+#ifndef S2_SH_ND
+#define S2_SH_ND 3            //   ... and into the wall (quantiles of the expected attenuation)
+#endif
+#ifndef S2_SH_MFP
+#define S2_SH_MFP 5.0f        //   shell thickness = min(S2_SH_MFP mean free paths at E0, S2_SH_MAX mm)
+#endif
+#ifndef S2_SH_MAX
+#define S2_SH_MAX 1.5f
+#endif
+#ifndef S2_BK_N
+#define S2_BK_N 12            // collimator bulk: lateral grid (x and z) ...
+#endif
+#ifndef S2_BK_NY
+#define S2_BK_NY 4            //   ... and points through the thickness
+#endif
+#ifndef S2_BK_SKIP_MUT
+#define S2_BK_SKIP_MUT 15.0f  //   no bulk term for layers with mu*T above this (opaque: < e^-15)
+#endif
+#ifndef S2_PE_REL
+#define S2_PE_REL 1e-7f       // crystal scatter: skip (j, v) with PE[j,v] < S2_PE_REL x max(PE)
+#endif
+#define S2_MAXK 64            // crystals between scatter crystal and detector crystal kept per thread
+#define S2_MAXNB 24           // nearest crystals checked for shadowing of collimator scatter
+#define S2_MAXLAYERS 10
+#define S2_NXI 12             // floats per crystal in the crystal-info array
+
+struct S2V { float x, y, z; };
+__device__ inline S2V s2v(float x, float y, float z) { S2V r; r.x = x; r.y = y; r.z = z; return r; }
+__device__ inline S2V s2add(S2V a, S2V b) { return s2v(a.x + b.x, a.y + b.y, a.z + b.z); }
+__device__ inline S2V s2sub(S2V a, S2V b) { return s2v(a.x - b.x, a.y - b.y, a.z - b.z); }
+__device__ inline S2V s2mul(S2V a, float s) { return s2v(a.x * s, a.y * s, a.z * s); }
+__device__ inline float s2dot(S2V a, S2V b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+__device__ inline float s2len(S2V a) { return sqrtf(s2dot(a, a)); }
+__device__ inline float s2get(S2V a, int k) { return k == 0 ? a.x : (k == 1 ? a.y : a.z); }
+__device__ inline void s2put(S2V& a, int k, float v) { if (k == 0) a.x = v; else if (k == 1) a.y = v; else a.z = v; }
+
+// Crystal k as an oriented box. Crystal-info layout (S2_NXI floats, built by s2_crystalInfo):
+// centre x, y (+FOV2Collimator), z | half width, half thickness, half height | cos, sin of the
+// rotation about y | bounding radius | half extents of the world-aligned bounding box
+struct S2Box { S2V c, h, a; float cr, sr, R; };
+__device__ inline S2Box s2box(const float* xi, int k) {
+    const float* p = xi + S2_NXI * k;
+    S2Box b;
+    b.c = s2v(p[0], p[1], p[2]); b.h = s2v(p[3], p[4], p[5]);
+    b.cr = p[6]; b.sr = p[7]; b.R = p[8]; b.a = s2v(p[9], p[10], p[11]);
+    return b;
+}
+// world <-> crystal frame (same convention as the kernels above: rotation about y)
+__device__ inline S2V s2dirToLocal(const S2Box& b, S2V d) { return s2v(d.x * b.cr + d.z * b.sr, d.y, -d.x * b.sr + d.z * b.cr); }
+__device__ inline S2V s2toLocal(const S2Box& b, S2V p) { return s2dirToLocal(b, s2sub(p, b.c)); }
+__device__ inline S2V s2dirToWorld(const S2Box& b, S2V d) { return s2v(d.x * b.cr - d.z * b.sr, d.y, d.x * b.sr + d.z * b.cr); }
+__device__ inline S2V s2toWorld(const S2Box& b, S2V p) { return s2add(b.c, s2dirToWorld(b, p)); }
+
+// Clip the segment p0 -> p1 to the box [lo, hi]: parameter range [t0, t1] in [0, 1]; false if outside
+__device__ inline bool s2clip(S2V p0, S2V p1, S2V lo, S2V hi, float& t0, float& t1) {
+    S2V d = s2sub(p1, p0);
+    t0 = 0.0f; t1 = 1.0f;
+    for (int k = 0; k < 3; ++k) {
+        float o = s2get(p0, k), dk = s2get(d, k), a = s2get(lo, k), b = s2get(hi, k);
+        if (fabsf(dk) < 1e-12f) { if (o < a || o > b) return false; continue; }
+        float ta = (a - o) / dk, tb = (b - o) / dk;
+        if (ta > tb) { float t = ta; ta = tb; tb = t; }
+        t0 = fmaxf(t0, ta); t1 = fminf(t1, tb);
+        if (t1 <= t0) return false;
+    }
+    return true;
+}
+// Length of the segment p0 -> p1 inside crystal b
+__device__ inline float s2segCrystal(const S2Box& b, S2V p0, S2V p1) {
+    S2V q0 = s2toLocal(b, p0), q1 = s2toLocal(b, p1);
+    float t0, t1;
+    if (!s2clip(q0, q1, s2mul(b.h, -1.0f), b.h, t0, t1)) return 0.0f;
+    return (t1 - t0) * s2len(s2sub(q1, q0));
+}
+// Distance from p (inside or on the surface of a box with half sizes h) to its exit along unit d
+__device__ inline float s2exit(S2V p, S2V d, S2V h) {
+    float t = 1e30f;
+    for (int k = 0; k < 3; ++k) {
+        float dk = s2get(d, k), o = s2get(p, k), hk = s2get(h, k);
+        if (dk > 1e-12f) t = fminf(t, (hk - o) / dk);
+        else if (dk < -1e-12f) t = fminf(t, (-hk - o) / dk);
+    }
+    return fmaxf(t, 0.0f);
+}
+// Length of the segment p0 -> p1 inside the cylinder with axis along y through (cx, cz), y in [y1, y2]
+__device__ inline float s2segCylY(S2V p0, S2V p1, float cx, float cz, float y1, float y2, float R) {
+    S2V d = s2sub(p1, p0);
+    float L = s2len(d);
+    if (L <= 0.0f) return 0.0f;
+    d = s2mul(d, 1.0f / L);
+    float t0 = 0.0f, t1 = L;
+    if (fabsf(d.y) < 1e-12f) { if (p0.y < y1 || p0.y > y2) return 0.0f; }
+    else {
+        float ta = (y1 - p0.y) / d.y, tb = (y2 - p0.y) / d.y;
+        if (ta > tb) { float t = ta; ta = tb; tb = t; }
+        t0 = fmaxf(t0, ta); t1 = fminf(t1, tb);
+        if (t1 <= t0) return 0.0f;
+    }
+    float ox = p0.x - cx, oz = p0.z - cz;
+    float A = d.x * d.x + d.z * d.z, B = ox * d.x + oz * d.z, C = ox * ox + oz * oz - R * R;
+    if (A < 1e-12f) { if (C > 0.0f) return 0.0f; }
+    else {
+        float disc = B * B - A * C;
+        if (disc <= 0.0f) return 0.0f;
+        float sq = sqrtf(disc);
+        t0 = fmaxf(t0, (-B - sq) / A); t1 = fminf(t1, (-B + sq) / A);
+        if (t1 <= t0) return 0.0f;
+    }
+    return t1 - t0;
+}
+// Solid angle of the rectangle [u0,u1] x [v0,v1] (coordinates from the foot of the perpendicular)
+// seen from a point at height h above its plane
+__device__ inline float s2rectOmega(float u0, float u1, float v0, float v1, float h) {
+    float h2 = h * h;
+    float a = atanf(u1 * v1 / (h * sqrtf(u1 * u1 + v1 * v1 + h2)));
+    float b = atanf(u0 * v1 / (h * sqrtf(u0 * u0 + v1 * v1 + h2)));
+    float c = atanf(u1 * v0 / (h * sqrtf(u1 * u1 + v0 * v0 + h2)));
+    float d = atanf(u0 * v0 / (h * sqrtf(u0 * u0 + v0 * v0 + h2)));
+    return fabsf(a - b - c + d);
+}
+// Klein-Nishina: shape of dsigma/dOmega (= diffComptonSection) and its integral over [0, pi] with sin(theta)
+__device__ inline float s2knShape(float c, float a) {
+    float f1 = a * (1.0f - c), f2 = 1.0f + c * c;
+    return f2 / ((1.0f + f1) * (1.0f + f1)) * (1.0f + f1 * f1 / f2 / (1.0f + f1));
+}
+__device__ inline float s2knTotal(float a) {
+    if (a < 0.01f) return 8.0f / 3.0f * (1.0f - 2.0f * a + 5.2f * a * a);
+    float l = logf(1.0f + 2.0f * a), q = 1.0f + 2.0f * a;
+    return 2.0f * ((1.0f + a) / (a * a) * (2.0f * (1.0f + a) / q - l / a) + l / (2.0f * a) - (1.0f + 3.0f * a) / (q * q));
+}
+// Probability that energy E is recorded inside [lo, hi] by a crystal with FWHM resolution R0 at E0
+__device__ inline float s2window(float E, float lo, float hi, float R0, float E0) {
+    if (R0 <= 0.0f) return (E >= lo && E <= hi) ? 1.0f : 0.0f;
+    float s = R0 * sqrtf(E0 / E) * E * (1.41421356f / 2.35482f);
+    return 0.5f * (erff((hi - E) / s) - erff((lo - E) / s));
+}
+
+struct S2Mu { float pe, c; };     // attenuation coefficients at E0 (1/mm)
+__device__ inline float s2mu(S2Mu m, float r3, float rc) { return m.pe * r3 + m.c * rc; }   // r3 = (E0/E)^3, rc = KN(E)/KN(E0)
+
+// Scatter energy-independent constants shared by all rays of a thread
+struct S2Phys { float E0, a0, knNorm, knTot0Inv, lo, hi, R0; };
+
+// Collimator layers (Param_Collimator), the spatial hash of the holes (as in PEGen) and the hole table
+struct S2Col {
+    int n, totalHoles;
+    float hx[S2_MAXLAYERS], y1[S2_MAXLAYERS], y2[S2_MAXLAYERS], hz[S2_MAXLAYERS];
+    S2Mu mu[S2_MAXLAYERS];
+    int h0[S2_MAXLAYERS], nh[S2_MAXLAYERS];
+    float fov2col, maxR;
+};
+struct S2Hash { const int* idx; const int* cnt; float ox, oz, cell; int nx, nz, mpc; };
+
+__device__ inline int s2layerOf(const S2Col& L, int h) {
+    for (int m = 0; m < L.n; ++m) if (h >= L.h0[m] && h < L.h0[m] + L.nh[m]) return m;
+    return -1;
+}
+
+// Attenuation exponent of layer m (material + holes) along p0 -> p1
+__device__ float s2layerTau(const float* col, const S2Col& L, const S2Hash& H, int m, S2V p0, S2V p1, float r3, float rc) {
+    float t0, t1;
+    if (!s2clip(p0, p1, s2v(-L.hx[m], L.y1[m], -L.hz[m]), s2v(L.hx[m], L.y2[m], L.hz[m]), t0, t1)) return 0.0f;
+    S2V d = s2sub(p1, p0);
+    S2V q0 = s2add(p0, s2mul(d, t0)), q1 = s2add(p0, s2mul(d, t1));
+    float Ls = (t1 - t0) * s2len(d), Lh = 0.0f, tauHoles = 0.0f;
+    if (L.nh[m] > 0) {
+        float r = L.maxR;
+        int cx0 = max(0, (int)floorf((fminf(q0.x, q1.x) - r - H.ox) / H.cell));
+        int cx1 = min(H.nx - 1, (int)floorf((fmaxf(q0.x, q1.x) + r - H.ox) / H.cell));
+        int cz0 = max(0, (int)floorf((fminf(q0.z, q1.z) - r - H.oz) / H.cell));
+        int cz1 = min(H.nz - 1, (int)floorf((fmaxf(q0.z, q1.z) + r - H.oz) / H.cell));
+        for (int cx = cx0; cx <= cx1; ++cx)
+            for (int cz = cz0; cz <= cz1; ++cz) {
+                int cid = cx * H.nz + cz;
+                for (int k = 0; k < H.cnt[cid]; ++k) {
+                    int h = H.idx[cid * H.mpc + k];
+                    if (h < L.h0[m] || h >= L.h0[m] + L.nh[m]) continue;
+                    const float* hp = col + 100 + 9 * h;
+                    // count every hole once: only in the cell that holds its centre
+                    if ((int)floorf((hp[0] - H.ox) / H.cell) != cx || (int)floorf((hp[3] - H.oz) / H.cell) != cz) continue;
+                    float l = s2segCylY(q0, q1, hp[0], hp[3], hp[1] + L.fov2col, hp[2] + L.fov2col, hp[4]);
+                    Lh += l;
+                    tauHoles += hp[5] * l;
+                }
+            }
+    }
+    return s2mu(L.mu[m], r3, rc) * fmaxf(Ls - Lh, 0.0f) + tauHoles;
+}
+__device__ inline float s2colTau(const float* col, const S2Col& L, const S2Hash& H, S2V p0, S2V p1, float r3, float rc) {
+    float tau = 0.0f;
+    for (int m = 0; m < L.n; ++m) tau += s2layerTau(col, L, H, m, p0, p1, r3, rc);
+    return tau;
+}
+// Smallest distance from p to the wall of a hole of layer m (negative inside a hole), skipping hole `skip`
+__device__ float s2wallDist(const float* col, const S2Col& L, const S2Hash& H, int m, S2V p, int skip, float reach) {
+    float best = 1e30f, r = reach + L.maxR;
+    int cx0 = max(0, (int)floorf((p.x - r - H.ox) / H.cell)), cx1 = min(H.nx - 1, (int)floorf((p.x + r - H.ox) / H.cell));
+    int cz0 = max(0, (int)floorf((p.z - r - H.oz) / H.cell)), cz1 = min(H.nz - 1, (int)floorf((p.z + r - H.oz) / H.cell));
+    for (int cx = cx0; cx <= cx1; ++cx)
+        for (int cz = cz0; cz <= cz1; ++cz) {
+            int cid = cx * H.nz + cz;
+            for (int k = 0; k < H.cnt[cid]; ++k) {
+                int h = H.idx[cid * H.mpc + k];
+                if (h == skip || h < L.h0[m] || h >= L.h0[m] + L.nh[m]) continue;
+                const float* hp = col + 100 + 9 * h;
+                float dx = p.x - hp[0], dz = p.z - hp[3];
+                best = fminf(best, sqrtf(dx * dx + dz * dz) - hp[4]);
+            }
+        }
+    return best;
+}
+
+// Sum over the faces of crystal I visible from p of
+//   (Klein-Nishina probability per solid angle) x (solid angle) x P(photo-absorption in I) x
+//   P(energy window) x exp(-attenuation on the way)
+// for a photon that arrived at p along din and scatters there.  Faces are split into patches small
+// compared with their distance from p (angle, energy, window, att.farTau per patch); the chord
+// through I and att.nearTau (crystals next to I) are averaged over at least S2_CHORD_N^2 entry
+// points per face, because they change across a face even when it is far away.
+template <class Att>
+__device__ float s2toCrystal(S2V p, S2V din, const S2Phys& P, const S2Box& I, S2Mu muI, const Att& att) {
+    S2V pl = s2toLocal(I, p), dl = s2dirToLocal(I, din);
+    float sum = 0.0f;
+    for (int A = 0; A < 3; ++A) {
+        float pa = s2get(pl, A), ha = s2get(I.h, A);
+        float sgn = pa > ha ? 1.0f : (pa < -ha ? -1.0f : 0.0f);
+        if (sgn == 0.0f) continue;
+        float hd = sgn * pa - ha;                                        // height above the face
+        int U = (A + 1) % 3, V = (A + 2) % 3;
+        float pu = s2get(pl, U), pv = s2get(pl, V), hu = s2get(I.h, U), hv = s2get(I.h, V);
+        float du = fmaxf(fabsf(pu) - hu, 0.0f), dv = fmaxf(fabsf(pv) - hv, 0.0f);
+        float dmin = sqrtf(hd * hd + du * du + dv * dv);                 // distance to the face
+        int nu = min(S2_PATCH_MAX, max(1, (int)ceilf(2.0f * hu / (S2_PATCH * dmin))));
+        int nv = min(S2_PATCH_MAX, max(1, (int)ceilf(2.0f * hv / (S2_PATCH * dmin))));
+        int mu_ = (S2_CHORD_N + nu - 1) / nu, mv_ = (S2_CHORD_N + nv - 1) / nv;   // entry points per patch
+        for (int iu = 0; iu < nu; ++iu) {
+            float u0 = -hu + 2.0f * hu * iu / nu - pu, u1 = -hu + 2.0f * hu * (iu + 1) / nu - pu;
+            for (int iv = 0; iv < nv; ++iv) {
+                float v0 = -hv + 2.0f * hv * iv / nv - pv, v1 = -hv + 2.0f * hv * (iv + 1) / nv - pv;
+                S2V c = pl;                                              // patch centre on the face
+                s2put(c, A, sgn * ha);
+                s2put(c, U, pu + 0.5f * (u0 + u1));
+                s2put(c, V, pv + 0.5f * (v0 + v1));
+                S2V dir = s2sub(c, pl);
+                dir = s2mul(dir, 1.0f / s2len(dir));
+                float ct = s2dot(dl, dir);
+                float Es = P.E0 / (1.0f + P.a0 * (1.0f - ct));
+                float w = s2window(Es, P.lo, P.hi, P.R0, P.E0);
+                if (w < 1e-9f) continue;
+                float r = P.E0 / Es, r3 = r * r * r, rc = s2knTotal(Es / 511.0f) * P.knTot0Inv;
+                float mPE = muI.pe * r3, mT = mPE + muI.c * rc;
+                if (mT <= 0.0f) continue;
+                float g = s2knShape(ct, P.a0) * P.knNorm * s2rectOmega(u0, u1, v0, v1, hd) * w * mPE / mT *
+                          expf(-att.farTau(p, s2toWorld(I, c), r3, rc));
+                if (g <= 0.0f) continue;
+                float pabs = 0.0f;
+                for (int a = 0; a < mu_; ++a)
+                    for (int b = 0; b < mv_; ++b) {
+                        S2V q = c;                                       // entry point on the patch
+                        s2put(q, U, pu + u0 + (u1 - u0) * (a + 0.5f) / mu_);
+                        s2put(q, V, pv + v0 + (v1 - v0) * (b + 0.5f) / mv_);
+                        S2V e = s2sub(q, pl);
+                        e = s2mul(e, 1.0f / s2len(e));
+                        pabs += (1.0f - expf(-mT * s2exit(q, e, I.h))) * expf(-att.nearTau(p, s2toWorld(I, q), r3, rc));
+                    }
+                sum += g * pabs / (mu_ * mv_);
+            }
+        }
+    }
+    return sum;
+}
+
+// Attenuation by the crystals in a list, along p -> q (bounding-sphere test first)
+__device__ inline float s2crystalsTau(const float* xi, const float* det, const int* kl, int nk, S2V p, S2V q, float r3, float rc) {
+    float tau = 0.0f;
+    S2V d = s2sub(q, p);
+    float L2 = s2dot(d, d);
+    for (int n = 0; n < nk; ++n) {
+        int k = kl[n];
+        if (k < 0) break;
+        S2Box K = s2box(xi, k);
+        S2V e = s2sub(K.c, p);
+        float t = fminf(fmaxf(s2dot(e, d) / L2, 0.0f), 1.0f);
+        S2V f = s2sub(e, s2mul(d, t));
+        if (s2dot(f, f) > K.R * K.R) continue;
+        float l = s2segCrystal(K, p, q);
+        if (l > 0.0f) { S2Mu mk = { det[12 * k + 8], det[12 * k + 9] }; tau += s2mu(mk, r3, rc) * l; }
+    }
+    return tau;
+}
+// Attenuation of crystal-scattered photons: rest of the scatter crystal J, crystals in between
+struct S2AttXtal {
+    const float* xi; const float* det;
+    S2Box J; S2Mu muJ;
+    const int* kl; int nk;
+    __device__ float farTau(S2V, S2V, float, float) const { return 0.0f; }
+    __device__ float nearTau(S2V p, S2V q, float r3, float rc) const {
+        return s2mu(muJ, r3, rc) * s2segCrystal(J, p, q) + s2crystalsTau(xi, det, kl, nk, p, q, r3, rc);
+    }
+};
+// Attenuation of collimator-scattered photons: collimator layers and holes (per patch), crystals
+// next to the detector crystal (per entry point)
+struct S2AttCol {
+    const float* col; const float* xi; const float* det;
+    S2Col L; S2Hash H;
+    const int* nb;                                                       // S2_MAXNB neighbours of I, -1 padded
+    __device__ float farTau(S2V p, S2V q, float r3, float rc) const { return s2colTau(col, L, H, p, q, r3, rc); }
+    __device__ float nearTau(S2V p, S2V q, float r3, float rc) const { return s2crystalsTau(xi, det, nb, S2_MAXNB, p, q, r3, rc); }
+};
+
+// Voxel centre in the world frame (same as the kernels above)
+__device__ inline S2V s2voxel(const float* img, long long col) {
+    int nX = (int)floorf(img[0] + 0.001f), nY = (int)floorf(img[1] + 0.001f), nZ = (int)floorf(img[2] + 0.001f);
+    int iz = (int)(col / ((long long)nY * nX));
+    long long rem = col % ((long long)nY * nX);
+    int iy = (int)(rem / nX), ix = (int)(rem % nX);
+    float x = (ix - nX / 2.0f + 0.5f) * img[3] + img[8];
+    float y = (iy - nY / 2.0f + 0.5f) * img[4] + img[9];
+    float z = (iz - nZ / 2.0f + 0.5f) * img[5] + img[10];
+    float ang = img[20] * img[7];
+    return s2v(x * cosf(ang) - y * sinf(ang), x * sinf(ang) + y * cosf(ang), z);
+}
+// Physics constants and the energy window of detector crystal i
+__device__ inline S2Phys s2phys(const float* det, const float* phy, int i) {
+    S2Phys P;
+    P.E0 = phy[7];
+    P.a0 = P.E0 / 511.0f;
+    float kt = s2knTotal(P.a0);
+    P.knNorm = 1.0f / (2.0f * (float)M_PI * kt);
+    P.knTot0Inv = 1.0f / kt;
+    P.R0 = det[12 * i + 10];
+    if ((int)floorf(phy[4] + 0.5f) > 0) { P.lo = phy[5]; P.hi = phy[6]; }
+    else { P.lo = (1.0f - P.R0 / 2.0f) * P.E0; P.hi = (1.0f + P.R0 / 2.0f) * P.E0; }
+    return P;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Crystal scatter: thread (row = detector crystal i, col = voxel v, slice = scatter crystal j)
+// ---------------------------------------------------------------------------------------------
+__global__ void crystalScatterV2(float* dst, const float* xi, const float* det, const float* img, const float* phy,
+                                 const float* pe, const unsigned int* bitmapCrystal, int nP, int nI, float peMin)
+{
+    long long i = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+    long long v = blockIdx.y * (long long)blockDim.y + threadIdx.y;
+    long long j = blockIdx.z * (long long)blockDim.z + threadIdx.z;
+    if (i >= nP || v >= nI || j >= nP || i == j) return;
+    if ((int)floorf(phy[0] + 0.5f) != 1 || det[12 * i + 7] <= 0.01f) return;
+    float Pj = pe[(long long)nI * j + v];
+    S2Mu muJ = { det[12 * j + 8], det[12 * j + 9] };
+    if (Pj <= peMin || muJ.pe <= 0.0f || muJ.c <= 0.0f) return;
+    float PC = Pj * muJ.c / muJ.pe;                                      // Compton first-interaction probability in j
+
+    S2Phys P = s2phys(det, phy, (int)i);
+    S2V vox = s2voxel(img, v);
+    S2Box J = s2box(xi, (int)j), I = s2box(xi, (int)i);
+    S2Mu muI = { det[12 * i + 8], det[12 * i + 9] };
+
+    // crystals between j and i: flagged in the bitmap and overlapping the bounding box of both
+    int kl[S2_MAXK];
+    int nk = 0;
+    S2V lo = s2v(fminf(J.c.x - J.a.x, I.c.x - I.a.x), fminf(J.c.y - J.a.y, I.c.y - I.a.y), fminf(J.c.z - J.a.z, I.c.z - I.a.z));
+    S2V hi = s2v(fmaxf(J.c.x + J.a.x, I.c.x + I.a.x), fmaxf(J.c.y + J.a.y, I.c.y + I.a.y), fmaxf(J.c.z + J.a.z, I.c.z + I.a.z));
+    for (int k = 0; k < nP && nk < S2_MAXK; ++k) {
+        if (k == i || k == j) continue;
+        const float* q = xi + S2_NXI * k;
+        if (q[0] + q[9] < lo.x || q[0] - q[9] > hi.x || q[1] + q[10] < lo.y || q[1] - q[10] > hi.y ||
+            q[2] + q[11] < lo.z || q[2] - q[11] > hi.z) continue;
+        if (indexFrombitmap_crystal((int)j, (int)i, k, (unsigned int*)bitmapCrystal, nP, 32) == 0) continue;
+        kl[nk++] = k;
+    }
+    S2AttXtal att = { xi, det, J, muJ, kl, nk };
+
+    // scatter points: grid over j, weighted by the attenuation of the incoming beam inside j
+    float D = s2len(s2sub(J.c, I.c));
+    int nx = min(S2_XT_NXZ, max(1, (int)ceilf(2.0f * J.h.x / (S2_XT_GRID * D))));
+    int ny = min(S2_XT_NY, max(1, (int)ceilf(2.0f * J.h.y / (S2_XT_GRID * D))));
+    int nz = min(S2_XT_NXZ, max(1, (int)ceilf(2.0f * J.h.z / (S2_XT_GRID * D))));
+    float muJ0 = muJ.pe + muJ.c;
+    S2V vl = s2toLocal(J, vox), mh = s2mul(J.h, -1.0f);
+    float wsum = 0.0f;
+    for (int a = 0; a < nx; ++a)
+        for (int b = 0; b < ny; ++b)
+            for (int c = 0; c < nz; ++c) {
+                S2V sl = s2v(J.h.x * (2.0f * (a + 0.5f) / nx - 1.0f), J.h.y * (2.0f * (b + 0.5f) / ny - 1.0f), J.h.z * (2.0f * (c + 0.5f) / nz - 1.0f));
+                float t0, t1;
+                float depth = s2clip(vl, sl, mh, J.h, t0, t1) ? (t1 - t0) * s2len(s2sub(sl, vl)) : 0.0f;
+                wsum += expf(-muJ0 * depth);
+            }
+    if (wsum <= 0.0f) return;
+    float acc = 0.0f;
+    for (int a = 0; a < nx; ++a)
+        for (int b = 0; b < ny; ++b)
+            for (int c = 0; c < nz; ++c) {
+                S2V sl = s2v(J.h.x * (2.0f * (a + 0.5f) / nx - 1.0f), J.h.y * (2.0f * (b + 0.5f) / ny - 1.0f), J.h.z * (2.0f * (c + 0.5f) / nz - 1.0f));
+                float t0, t1;
+                float depth = s2clip(vl, sl, mh, J.h, t0, t1) ? (t1 - t0) * s2len(s2sub(sl, vl)) : 0.0f;
+                S2V s = s2toWorld(J, sl);
+                S2V din = s2sub(s, vox);
+                din = s2mul(din, 1.0f / s2len(din));
+                acc += expf(-muJ0 * depth) * s2toCrystal(s, din, P, I, muI, att);
+            }
+    atomicAdd(&dst[i * nI + v], PC * acc / wsum);
+}
+
+// Common part of the collimator kernels: a scatter point r in layer m with volume dV
+__device__ inline float s2colPoint(S2V r, float dV, S2V vox, int m, const float* col, const S2Col& L, const S2Hash& H,
+                                   const S2Phys& P, const S2Box& I, S2Mu muI, const S2AttCol& att) {
+    S2V d = s2sub(r, vox);
+    float dist2 = s2dot(d, d);
+    float base = dV * L.mu[m].c * expf(-s2colTau(col, L, H, vox, r, 1.0f, 1.0f)) / (4.0f * (float)M_PI * dist2);
+    if (base < 1e-30f) return 0.0f;
+    return base * s2toCrystal(r, s2mul(d, 1.0f / sqrtf(dist2)), P, I, muI, att);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Collimator scatter, shell around each hole: thread (row = detector crystal i, col = voxel v,
+// slice = hole h - holeOffset).  The shell is r in [R, R + dmax] around the hole axis over the hole
+// length; points closer to another hole belong to that hole.
+// ---------------------------------------------------------------------------------------------
+__global__ void collimatorScatterShellV2(float* dst, const float* col, const float* xi, const float* det, const float* img,
+                                         const float* phy, S2Col L, S2Hash H, const int* nbList, int nP, int nI,
+                                         int holeOffset, int nHoles)
+{
+    long long i = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+    long long v = blockIdx.y * (long long)blockDim.y + threadIdx.y;
+    long long hs = blockIdx.z * (long long)blockDim.z + threadIdx.z;
+    if (i >= nP || v >= nI || hs >= nHoles) return;
+    int h = holeOffset + (int)hs;
+    int m = s2layerOf(L, h);
+    if (m < 0 || L.mu[m].c <= 0.0f) return;
+    if ((int)floorf(phy[0] + 0.5f) != 1 || det[12 * i + 7] <= 0.01f) return;
+
+    S2Phys P = s2phys(det, phy, (int)i);
+    S2V vox = s2voxel(img, v);
+    S2Box I = s2box(xi, (int)i);
+    S2Mu muI = { det[12 * i + 8], det[12 * i + 9] };
+    S2AttCol att = { col, xi, det, L, H, nbList + (long long)S2_MAXNB * i };
+
+    const float* hp = col + 100 + 9 * h;
+    float xh = hp[0], zh = hp[3], R = hp[4];
+    float y1 = hp[1] + L.fov2col, y2 = hp[2] + L.fov2col;
+    float mu0 = L.mu[m].pe + L.mu[m].c;
+    float dmax = fminf(S2_SH_MFP / mu0, S2_SH_MAX);
+    float dpsi = 2.0f * (float)M_PI / S2_SH_NPSI, dy = (y2 - y1) / S2_SH_NY;
+    float acc = 0.0f;
+    for (int iy = 0; iy < S2_SH_NY; ++iy) {
+        float y = y1 + (iy + 0.5f) * dy;
+        for (int ip = 0; ip < S2_SH_NPSI; ++ip) {
+            float psi = (ip + 0.5f) * dpsi, cp = cosf(psi), sp = sinf(psi);
+            S2V n = s2v(cp, 0.0f, sp);
+            S2V r0 = s2v(xh + R * cp, y, zh + R * sp);
+            // depth points: quantiles of exp(-kappa*delta), kappa = attenuation per unit depth of the
+            // incoming and the scattered photon (estimated at the wall surface)
+            S2V a = s2sub(r0, vox), b = s2sub(I.c, r0);
+            float ci = fmaxf(fabsf(s2dot(n, a)) / s2len(a), 0.05f), co = fmaxf(fabsf(s2dot(n, b)) / s2len(b), 0.05f);
+            float kap = fmaxf(mu0 / ci + mu0 / co, 1.0f / dmax);
+            float Pd = 1.0f - expf(-kap * dmax);
+            for (int id = 0; id < S2_SH_ND; ++id) {
+                float qd = (id + 0.5f) / S2_SH_ND;
+                float dl = -logf(1.0f - qd * Pd) / kap;
+                float wd = Pd / (kap * S2_SH_ND) * expf(kap * dl);       // integral weight of this depth
+                S2V r = s2v(xh + (R + dl) * cp, y, zh + (R + dl) * sp);
+                if (fabsf(r.x) > L.hx[m] || fabsf(r.z) > L.hz[m]) continue;
+                if (s2wallDist(col, L, H, m, r, h, dl) < dl) continue;    // closer to another hole
+                acc += s2colPoint(r, (R + dl) * dpsi * dy * wd, vox, m, col, L, H, P, I, muI, att);
+            }
+        }
+    }
+    atomicAdd(&dst[i * nI + v], acc);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Collimator scatter, rest of the plate: thread (row = detector crystal i, col = voxel v, slice = layer m).
+// Grid over the part of the layer from which the scattered photon can still reach the energy
+// window; points inside a hole shell are left to collimatorScatterShellV2.
+// ---------------------------------------------------------------------------------------------
+__global__ void collimatorScatterBulkV2(float* dst, const float* col, const float* xi, const float* det, const float* img,
+                                        const float* phy, S2Col L, S2Hash H, const int* nbList, int nP, int nI)
+{
+    long long i = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+    long long v = blockIdx.y * (long long)blockDim.y + threadIdx.y;
+    int m = (int)(blockIdx.z * blockDim.z + threadIdx.z);
+    if (i >= nP || v >= nI || m >= L.n) return;
+    float T = L.y2[m] - L.y1[m], mu0 = L.mu[m].pe + L.mu[m].c;
+    if (L.mu[m].c <= 0.0f || mu0 * T > S2_BK_SKIP_MUT) return;
+    if ((int)floorf(phy[0] + 0.5f) != 1 || det[12 * i + 7] <= 0.01f) return;
+
+    S2Phys P = s2phys(det, phy, (int)i);
+    S2V vox = s2voxel(img, v);
+    S2Box I = s2box(xi, (int)i);
+    S2Mu muI = { det[12 * i + 8], det[12 * i + 9] };
+    S2AttCol att = { col, xi, det, L, H, nbList + (long long)S2_MAXNB * i };
+
+    // lateral region: around the crossing of voxel -> crystal with the layer, as far as the largest
+    // scatter angle that can still give a count in the window (4 sigma below its lower edge)
+    float ym = 0.5f * (L.y1[m] + L.y2[m]);
+    float x0 = -L.hx[m], x1 = L.hx[m], z0 = -L.hz[m], z1 = L.hz[m];
+    float s = P.R0 > 0.0f ? P.R0 * sqrtf(P.E0 / P.lo) * P.lo / 2.35482f : 0.0f;
+    float Emin = P.lo - 4.0f * s, Eback = P.E0 / (1.0f + 2.0f * P.a0);
+    if (Emin > Eback && I.c.y != vox.y) {
+        float cmax = 1.0f - (P.E0 / Emin - 1.0f) / P.a0;
+        float th = acosf(fminf(fmaxf(cmax, -1.0f), 1.0f));
+        if (th < 1.2f) {
+            float t = (ym - vox.y) / (I.c.y - vox.y);
+            float px = vox.x + t * (I.c.x - vox.x), pz = vox.z + t * (I.c.z - vox.z);
+            float aa = fabsf(ym - vox.y), bb = fabsf(I.c.y - ym);
+            float rho = aa * bb / (aa + bb) * tanf(th) * 1.5f + I.R + 2.0f;
+            x0 = fmaxf(x0, px - rho); x1 = fminf(x1, px + rho);
+            z0 = fmaxf(z0, pz - rho); z1 = fminf(z1, pz + rho);
+            if (x1 <= x0 || z1 <= z0) return;
+        }
+    }
+    float dmax = fminf(S2_SH_MFP / mu0, S2_SH_MAX);
+    float dx = (x1 - x0) / S2_BK_N, dz = (z1 - z0) / S2_BK_N, dyy = T / S2_BK_NY;
+    float acc = 0.0f;
+    for (int a = 0; a < S2_BK_N; ++a)
+        for (int c = 0; c < S2_BK_N; ++c) {
+            float x = x0 + (a + 0.5f) * dx, z = z0 + (c + 0.5f) * dz;
+            if (L.nh[m] > 0 && s2wallDist(col, L, H, m, s2v(x, ym, z), -1, dmax) < dmax) continue;   // hole or shell
+            for (int b = 0; b < S2_BK_NY; ++b) {
+                S2V r = s2v(x, L.y1[m] + (b + 0.5f) * dyy, z);
+                acc += s2colPoint(r, dx * dz * dyy, vox, m, col, L, H, P, I, muI, att);
+            }
+        }
+    atomicAdd(&dst[i * nI + v], acc);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Host-side preparation for the v2 kernels (plain C++, shared with tools/analytic_cpu)
+// ---------------------------------------------------------------------------------------------
+static void s2_crystalInfo(const float* det, float fov2col, std::vector<float>& xi)
+{
+    int nP = (int)floorf(det[0] + 0.0001f);
+    xi.assign((size_t)nP * S2_NXI, 0.0f);
+    for (int k = 0; k < nP; ++k) {
+        float* p = &xi[(size_t)S2_NXI * k];
+        float hx = 0.5f * det[12 * k + 4], hy = 0.5f * det[12 * k + 5], hz = 0.5f * det[12 * k + 6];
+        float cr = cosf(det[12 * k + 11]), sr = sinf(det[12 * k + 11]);
+        p[0] = det[12 * k + 1]; p[1] = det[12 * k + 2] + fov2col; p[2] = det[12 * k + 3];
+        p[3] = hx; p[4] = hy; p[5] = hz; p[6] = cr; p[7] = sr;
+        p[8] = sqrtf(hx * hx + hy * hy + hz * hz);
+        p[9] = fabsf(cr) * hx + fabsf(sr) * hz; p[10] = hy; p[11] = fabsf(sr) * hx + fabsf(cr) * hz;
+    }
+}
+// The S2_MAXNB nearest crystals of every crystal (candidates for shadowing it), -1 padded
+static void s2_neighbours(const std::vector<float>& xi, int nP, std::vector<int>& nb)
+{
+    nb.assign((size_t)nP * S2_MAXNB, -1);
+    std::vector<std::pair<float, int> > d;
+    for (int i = 0; i < nP; ++i) {
+        const float* a = &xi[(size_t)S2_NXI * i];
+        d.clear();
+        for (int k = 0; k < nP; ++k) {
+            if (k == i) continue;
+            const float* b = &xi[(size_t)S2_NXI * k];
+            float dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2];
+            float dd = sqrtf(dx * dx + dy * dy + dz * dz);
+            if (dd <= a[8] + b[8] + 4.0f * a[4]) d.push_back(std::make_pair(dd, k));
+        }
+        std::sort(d.begin(), d.end());
+        for (int n = 0; n < (int)d.size() && n < S2_MAXNB; ++n) nb[(size_t)S2_MAXNB * i + n] = d[n].second;
+    }
+}
+// Collimator layers (as in PEGen) and the hole hash grid (identical to PESysMatGen)
+static S2Col s2_layers(const float* col, float fov2col)
+{
+    S2Col L;
+    memset(&L, 0, sizeof(L));
+    L.n = min((int)floorf(col[0] + 0.001f), S2_MAXLAYERS);
+    L.fov2col = fov2col;
+    int h0 = 0;
+    for (int m = 0; m < L.n; ++m) {
+        const float* b = col + (m + 1) * 10;
+        L.nh[m] = (int)b[0]; L.h0[m] = h0; h0 += L.nh[m];
+        L.hx[m] = b[1] / 2.0f; L.hz[m] = b[3] / 2.0f;
+        L.y1[m] = -b[2] / 2.0f + fov2col + b[4]; L.y2[m] = b[2] / 2.0f + fov2col + b[4];
+        L.mu[m].pe = b[6]; L.mu[m].c = b[7];
+        if (L.mu[m].pe + L.mu[m].c <= 0.0f && b[5] > 0.0f) L.mu[m].pe = b[5];   // only a total coefficient given
+    }
+    L.totalHoles = h0;
+    L.maxR = 0.0f;
+    for (int h = 0; h < h0; ++h) L.maxR = fmaxf(L.maxR, col[100 + 9 * h + 4]);
+    return L;
+}
+static void s2_holeHash(const float* col, const S2Col& L, std::vector<int>& idx, std::vector<int>& cnt, S2Hash& H)
+{
+    float colW = col[11], colH = col[13];
+    H.cell = fmaxf(2.0f * L.maxR + 0.5f, 2.0f);
+    H.ox = -colW / 2.0f - H.cell; H.oz = -colH / 2.0f - H.cell;
+    H.nx = (int)ceilf((colW + 2 * H.cell) / H.cell) + 1;
+    H.nz = (int)ceilf((colH + 2 * H.cell) / H.cell) + 1;
+    for (int m = 1; m < L.n; ++m) {                                      // cover every layer
+        H.nx = max(H.nx, (int)ceilf((2 * L.hx[m] + 2 * H.cell) / H.cell) + 1);
+        H.nz = max(H.nz, (int)ceilf((2 * L.hz[m] + 2 * H.cell) / H.cell) + 1);
+        H.ox = fminf(H.ox, -L.hx[m] - H.cell); H.oz = fminf(H.oz, -L.hz[m] - H.cell);
+    }
+    H.mpc = 16;
+    idx.assign((size_t)H.nx * H.nz * H.mpc, 0);
+    cnt.assign((size_t)H.nx * H.nz, 0);
+    int dropped = 0;
+    for (int h = 0; h < L.totalHoles; ++h) {
+        float hx = col[100 + 9 * h], hz = col[103 + 9 * h], hr = col[104 + 9 * h];
+        int cx0 = (int)floorf((hx - hr - H.ox) / H.cell), cx1 = (int)floorf((hx + hr - H.ox) / H.cell);
+        int cz0 = (int)floorf((hz - hr - H.oz) / H.cell), cz1 = (int)floorf((hz + hr - H.oz) / H.cell);
+        for (int cx = cx0; cx <= cx1; ++cx)
+            for (int cz = cz0; cz <= cz1; ++cz) {
+                if (cx < 0 || cx >= H.nx || cz < 0 || cz >= H.nz) continue;
+                int cid = cx * H.nz + cz;
+                if (cnt[cid] < H.mpc) idx[(size_t)cid * H.mpc + cnt[cid]++] = h;
+                else ++dropped;
+            }
+    }
+    if (dropped) printf("WARNING: %d hole entries dropped from the hole grid (more than %d per cell)\n", dropped, H.mpc);
+    H.idx = idx.data(); H.cnt = cnt.data();
+}
+static float s2_peMin(const float* pe, size_t n)
+{
+    float mx = 0.0f;
+    for (size_t k = 0; k < n; ++k) mx = fmaxf(mx, pe[k]);
+    return S2_PE_REL * mx;
+}
+
+
+int scatter(float* parameter_Collimator, float* parameter_Detector, float* parameter_Image, float* parameter_Physics,float* PE_SysMat,const char* FnameGeoCrystal, const char* FnameGeoCollimator, float* dst, int cuda_id, float* dstCrystal, float* dstCollimator, int model)
 {
 
 	cout << "Get into scatter function" << endl;
@@ -2182,6 +2854,22 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 	cout << "########################" << endl;
 
 	auto start_crystalScatterSysMatCuda = std::chrono::high_resolution_clock::now();
+	float* deviceCrystalInfo = 0;
+	std::vector<float> hostCrystalInfo;
+	if (model == 2)
+	{
+		s2_crystalInfo(h_parameter_Detector, h_parameter_Image[11], hostCrystalInfo);
+		cudaMalloc(&deviceCrystalInfo, sizeof(float) * hostCrystalInfo.size());
+		cudaMemcpy(deviceCrystalInfo, hostCrystalInfo.data(), sizeof(float) * hostCrystalInfo.size(), cudaMemcpyHostToDevice);
+		float peMin = s2_peMin(h_PE_SysMat, (size_t)numProjectionSingle * numImagebin);
+		cudaStreamSynchronize(stream);
+		cout << "Kernel crystalScatterV2 Launched (scatter model v2)" << endl;
+		crystalScatterV2 <<<gridSize, blockSize >>> (deviceMatrix_crystal, deviceCrystalInfo, deviceparameter_Detector,
+			deviceparameter_Image, deviceparameter_Physics, devicePEMatrix, deviceGeometryRelationShip_Crystal2Crystal,
+			numProjectionSingle, numImagebin, peMin);
+	}
+	else
+	{
 	cout << "Kernel crystalScatterSysMatCuda Launched " << endl;
 	crystalScatterSysMatCuda <<<gridSize, blockSize >>> (
 		deviceMatrix_crystal,
@@ -2192,6 +2880,7 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 		deviceGeometryRelationShip_Crystal2Crystal,
 		numProjectionSingle,
 		numImagebin);
+	}
 	
 	float* h_Crystal_SysMat;
 	cudaMallocHost(&h_Crystal_SysMat, sizeof(float) * numProjectionSingle * numImagebin);
@@ -2225,6 +2914,54 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 	///////////////////////////////////////////////////////////////////////////////////////////////////
 
 	///////////////// Promary Compton Scatter between Collimator and Detector Crystal /////////////////
+	float* h_Collimator_SysMat;
+	cudaMallocHost(&h_Collimator_SysMat, sizeof(float) * numProjectionSingle * numImagebin);
+	unsigned int* deviceGeometryRelationShip_Collimator2Crystal = 0;
+	unsigned int* hostGeometryRelationShip_Collimator2Crystal = 0;
+	auto start_CollimatorScatterSysMatCuda = std::chrono::high_resolution_clock::now();
+	if (model == 2)
+	{
+		S2Col layers = s2_layers(h_parameter_Collimator, h_parameter_Image[11]);
+		std::vector<int> hashIdx, hashCnt, neighbours;
+		S2Hash hash;
+		s2_holeHash(h_parameter_Collimator, layers, hashIdx, hashCnt, hash);
+		s2_neighbours(hostCrystalInfo, numProjectionSingle, neighbours);
+		int *deviceHashIdx, *deviceHashCnt, *deviceNeighbours;
+		cudaMalloc(&deviceHashIdx, sizeof(int) * hashIdx.size());
+		cudaMemcpy(deviceHashIdx, hashIdx.data(), sizeof(int) * hashIdx.size(), cudaMemcpyHostToDevice);
+		cudaMalloc(&deviceHashCnt, sizeof(int) * hashCnt.size());
+		cudaMemcpy(deviceHashCnt, hashCnt.data(), sizeof(int) * hashCnt.size(), cudaMemcpyHostToDevice);
+		cudaMalloc(&deviceNeighbours, sizeof(int) * neighbours.size());
+		cudaMemcpy(deviceNeighbours, neighbours.data(), sizeof(int) * neighbours.size(), cudaMemcpyHostToDevice);
+		hash.idx = deviceHashIdx;
+		hash.cnt = deviceHashCnt;
+		dim3 blockSize_collimator(16, 16, 1);
+		cout << "Kernel collimatorScatterShellV2 / collimatorScatterBulkV2 Launched (" << layers.n << " layers, "
+			<< layers.totalHoles << " holes, scatter model v2)" << endl;
+		for (int off = 0; off < layers.totalHoles; off += 65535)
+		{
+			int n = min(65535, layers.totalHoles - off);
+			dim3 gridShell((numProjectionSingle + 15) / 16, (numImagebin + 15) / 16, n);
+			collimatorScatterShellV2 <<<gridShell, blockSize_collimator >>> (deviceMatrix_collimator, deviceparameter_Collimator,
+				deviceCrystalInfo, deviceparameter_Detector, deviceparameter_Image, deviceparameter_Physics, layers, hash,
+				deviceNeighbours, numProjectionSingle, numImagebin, off, n);
+		}
+		if (layers.n > 0)
+		{
+			dim3 gridBulk((numProjectionSingle + 15) / 16, (numImagebin + 15) / 16, layers.n);
+			collimatorScatterBulkV2 <<<gridBulk, blockSize_collimator >>> (deviceMatrix_collimator, deviceparameter_Collimator,
+				deviceCrystalInfo, deviceparameter_Detector, deviceparameter_Image, deviceparameter_Physics, layers, hash,
+				deviceNeighbours, numProjectionSingle, numImagebin);
+		}
+		cudaCheckError(cudaGetLastError());
+		cudaCheckError(cudaMemcpy(h_Collimator_SysMat, deviceMatrix_collimator, sizeof(float) * numProjectionSingle * numImagebin, cudaMemcpyDeviceToHost));
+		cudaFree(deviceHashIdx);
+		cudaFree(deviceHashCnt);
+		cudaFree(deviceNeighbours);
+	}
+	else
+	{
+	// legacy model (kept as it was, not re-indented)
 
 	////-------------- Geometry RelationShip between Collimator Hole and Crystals -----------------////
 	// Calculate geometry relationship between each crystal and collimator holes, if the crystal_k is cross the line of 
@@ -2240,8 +2977,7 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 	cout << "Total bits: " << total_bits << endl;
 	cout << "Array size (unsigned int): " << array_size << endl;
 
-	unsigned int* deviceGeometryRelationShip_Collimator2Crystal;
-	unsigned int* hostGeometryRelationShip_Collimator2Crystal = new unsigned int[array_size]();
+	hostGeometryRelationShip_Collimator2Crystal = new unsigned int[array_size]();
 
 	int flagCalculateCollimatorGeometryRelationShip = (int)floor(parameter_Physics[9]+0.001f);
 	if (flagCalculateCollimatorGeometryRelationShip == 1)
@@ -2315,7 +3051,6 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 	cout << "gridSize.z = " << gridSize_collimator.z << endl;
 	cout << "########################" << endl;
 
-	auto start_CollimatorScatterSysMatCuda = std::chrono::high_resolution_clock::now();
 	cout << "Kernel collimatorScatterSysMatCuda Launched " << endl;
 	
 	collimatorScatterSysMatCuda <<<gridSize_collimator, blockSize_collimator >>> (
@@ -2332,8 +3067,6 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 	if (err != cudaSuccess) {
 		std::cerr << "Kernel collimatorScatterSysMatCuda launch failed: " << cudaGetErrorString(err) << std::endl;
 	}
-	float* h_Collimator_SysMat;
-	cudaMallocHost(&h_Collimator_SysMat, sizeof(float) * numProjectionSingle * numImagebin);
 	cudaMemcpyAsync(h_Collimator_SysMat, deviceMatrix_collimator, sizeof(float) * numProjectionSingle * numImagebin, cudaMemcpyDeviceToHost, stream);
 	cudaCheckError(cudaGetLastError());
 	cudaStreamSynchronize(stream);
@@ -2346,6 +3079,7 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 	fclose(fptmp);
 	cout << "Write Results of CollimatorScatterSysMatCuda function finished " << endl;
 	*/
+	}
 	auto end_CollimatorScatterSysMatCuda = std::chrono::high_resolution_clock::now();
 	auto duration_CollimatorScatterSysMatCuda = std::chrono::duration_cast<std::chrono::milliseconds>(end_CollimatorScatterSysMatCuda - start_CollimatorScatterSysMatCuda);
 	cout << "Time of  collimatorScatterSysMatCuda function: " << duration_CollimatorScatterSysMatCuda.count() / 1000.0 / 60.0 << " min" << endl;
@@ -2372,6 +3106,7 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 	cudaFree(deviceMatrix_collimator);
 	
 	cudaFree(deviceGeometryRelationShip_Collimator2Crystal);
+	cudaFree(deviceCrystalInfo);
 
 	delete[] hostGeometryRelationShip_Collimator2Crystal;
 	cudaStreamDestroy(stream);

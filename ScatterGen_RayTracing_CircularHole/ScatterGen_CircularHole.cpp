@@ -11,6 +11,7 @@
 //                -GeoCollimator <path_to_CollimatorGeometryRelationship>
 //                -cuda <cuda_device_id>
 //                -components   (also write Scatter_Crystal_SysMat_... and Scatter_Collimator_SysMat_...)
+//                -model v2|legacy   (default v2: volume-integrated single-scatter model, see scatter.cu)
 //
 // Author: Xingchun Zheng @ tsinghua university
 // Last Modified: 2024/12/21
@@ -104,6 +105,7 @@ int main(int argc, char* argv[])
 	string FnameGeoCollimator = "GeometryRelationShip_Collimator2Crystal";
 	int cuda_id = 0; 
 	bool writeComponents = false;
+	int model = 2;
 
 	for (int i = 1; i < argc; ++i)
 	{
@@ -128,6 +130,13 @@ int main(int argc, char* argv[])
 		{
 			writeComponents = true;
 		}
+		else if (strcmp(argv[i], "-model") == 0 && i + 1 < argc)
+		{
+			if (strcmp(argv[i + 1], "legacy") == 0) model = 1;
+			else if (strcmp(argv[i + 1], "v2") == 0) model = 2;
+			else { cerr << "-model must be v2 or legacy" << endl; return EXIT_FAILURE; }
+			i++;
+		}
 		else if (strcmp(argv[i], "-cuda") == 0 && i + 1 < argc)
 		{
 			cuda_id = atoi(argv[i + 1]);
@@ -135,7 +144,7 @@ int main(int argc, char* argv[])
 		}
 		else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0)
 		{
-			cout << "Usage: " << argv[0] << " [-PE PE_SysMat_path] [-GeoCrystal GeometryRelationShip_Crystal2Crystal_path] [-GeoCollimator GeometryRelationShip_Collimator2Crystal_path] [-cuda GPU_ID] [-components]" << endl;
+			cout << "Usage: " << argv[0] << " [-PE PE_SysMat_path] [-GeoCrystal GeometryRelationShip_Crystal2Crystal_path] [-GeoCollimator GeometryRelationShip_Collimator2Crystal_path] [-cuda GPU_ID] [-components] [-model v2|legacy]" << endl;
 			return 0;
 		}
 		else
@@ -171,6 +180,7 @@ int main(int argc, char* argv[])
 	//////////////////////////// Scatter Function Start ///////////////////////////////
 	cout << "Geometry RelationShip Crystal2Crystal:  " << FnameGeoCrystal << endl;
 	cout << "Geometry RelationShip Collimator2Crystal:  " << FnameGeoCollimator << endl;
+	cout << "Scatter model: " << (model == 2 ? "v2 (volume-integrated single scatter)" : "legacy") << endl;
 
 	auto start_scatter = std::chrono::high_resolution_clock::now();
 
@@ -195,7 +205,7 @@ int main(int argc, char* argv[])
 
 		int q = scatter(parameter_Collimator, parameter_Detector, parameter_Image, parameter_Physics, PE_SysMat + idxRotation * numProjectionSingle * numImagebin, FnameGeoCrystal.c_str(), FnameGeoCollimator.c_str(), out + idxRotation * numProjectionSingle * numImagebin, cuda_id,
 			writeComponents ? outCrystal + idxRotation * numProjectionSingle * numImagebin : 0,
-			writeComponents ? outCollimator + idxRotation * numProjectionSingle * numImagebin : 0);
+			writeComponents ? outCollimator + idxRotation * numProjectionSingle * numImagebin : 0, model);
 
 		printf("numImagebin = %d\n", q);
 	}

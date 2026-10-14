@@ -403,10 +403,14 @@ bool Simulation::setup(std::string& err) {
     std::string hbSpec = lower(cfg.str("hole_bias", "auto")), dbSpec = lower(cfg.str("detector_bias", "auto"));
     C.tgtMargin = (float)cfg.num("hole_target_margin", 0.25);
     std::string phys = lower(cfg.str("physics", "full"));
-    if (phys != "full" && phys != "primary_pe") { err = "physics must be full | primary_pe"; return false; }
+    if (phys != "full" && phys != "primary_pe" && phys != "single_scatter") {
+        err = "physics must be full | primary_pe | single_scatter";
+        return false;
+    }
     C.primaryOnly = phys == "primary_pe";
+    C.singleScatter = phys == "single_scatter";
     bool fluo = cfg.integer("fluorescence", 1) != 0;   // read in every mode (no "unknown key" warning)
-    C.fluo = !C.primaryOnly && fluo;
+    C.fluo = !C.primaryOnly && !C.singleScatter && fluo;
     bool rayleigh = cfg.integer("rayleigh", 1) != 0;
     C.eCut = (float)cfg.num("energy_cutoff_kev", 10.0);
     C.components = cfg.integer("save_components", 0) != 0;

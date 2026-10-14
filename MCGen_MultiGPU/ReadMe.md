@@ -138,7 +138,7 @@ H 的孔列表只依赖 (体素, 旋转)，所以结果仍与 GPU 数量和任�
 | `hole_material` | `params` | 通常 `Air` 或 `vacuum` |
 | `crystal_material` | `params` | 晶体材料；`crystal_material_flagK` 按 Param_Detector[12]==K 覆盖 |
 | `density_<材料>` | 库中密度 | 密度覆盖 (g/cm³) |
-| `physics` | `full` | `primary_pe`：任何散射即终止、无荧光，复现解析 PE 模型（用于验证） |
+| `physics` | `full` | `primary_pe`：任何散射即终止、无荧光，复现解析 PE 模型（用于验证）；`single_scatter`：最多一次康普顿散射（第二次散射或瑞利散射即终止）、无荧光、只记光电吸收的能量，且不计在散射晶体本身中的再吸收 —— 与解析散射模型 v2 的一阶散射定义完全一致（用于验证 ScatterGen） |
 | `rayleigh`, `fluorescence` | 1, 1 | 开关 |
 | `energy_cutoff_keV` | 10 | 低于此能量就地沉积 |
 | `shield_outside_collimator` | `absorber` | `absorber` / `slab` / `none`，见上；`slab` 外框大小由 `shield_frame_margin_mm`（20）或 `shield_frame_halfwidth_mm` / `shield_frame_halfheight_mm` 指定 |
