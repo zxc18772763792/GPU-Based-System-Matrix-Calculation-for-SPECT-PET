@@ -104,8 +104,8 @@ This project provides a GPU-based framework for calculating system matrices esse
    so pass it with `-PE`.
 
    The default scatter model (`-model v2`) integrates the single Compton scatter over the volume where
-   it happens: over the whole scatter crystal (weighted by the attenuation of the incoming beam) for
-   inter-crystal scatter, and over a thin shell around every collimator hole plus the rest of the plate
+   it happens: over the whole scatter crystal (weighted by the transmission of the incoming beam through
+   the collimator and the crystals to every point) for inter-crystal scatter, and over a thin shell around every collimator hole plus the rest of the plate
    for collimator scatter, with exact solid angles of the crystal faces, Klein–Nishina angles and
    energies, and attenuation of the scattered photon in the crystals and the collimator. Against the
    first-order Monte Carlo of `MCGen_MultiGPU` (`physics = single_scatter`, same physics definition) it

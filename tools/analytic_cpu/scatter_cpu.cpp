@@ -104,7 +104,7 @@ int main(int argc, char** argv) {
             for (int v = 0; v < nI; ++v)
                 for (int s = 0; s < nP; ++s) {
                     blockIdx.x = (unsigned)row; blockIdx.y = (unsigned)v; blockIdx.z = (unsigned)s;
-                    if (model == 2) crystalScatterV2(dX, xi.data(), det.data(), img.data(), phy.data(), peR, bitC.data(), nP, nI, peMin);
+                    if (model == 2) crystalScatterV2(dX, col.data(), xi.data(), det.data(), img.data(), phy.data(), peR, bitC.data(), layers, hash, nb.data(), nP, nI, peMin);
                     else crystalScatterSysMatCuda(dX, det.data(), img.data(), phy.data(), peR, bitC.data(), nP, nI);
                 }
         });

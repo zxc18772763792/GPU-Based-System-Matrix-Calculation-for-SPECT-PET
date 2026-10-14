@@ -14,6 +14,7 @@
 
 #define __global__
 #define __device__
+#define __constant__
 #define __host__
 #define __restrict__
 
