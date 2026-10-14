@@ -107,10 +107,11 @@ This project provides a GPU-based framework for calculating system matrices esse
    it happens: over the whole scatter crystal (weighted by the attenuation of the incoming beam) for
    inter-crystal scatter, and over a thin shell around every collimator hole plus the rest of the plate
    for collimator scatter, with exact solid angles of the crystal faces, Klein–Nishina angles and
-   energies, and attenuation of the scattered photon in the crystals and the collimator. Its reference is
-   the first-order Monte Carlo of `MCGen_MultiGPU` (`physics = single_scatter`), see
+   energies, and attenuation of the scattered photon in the crystals and the collimator. Against the
+   first-order Monte Carlo of `MCGen_MultiGPU` (`physics = single_scatter`, same physics definition) it
+   agrees within 5 % for crystal scatter and 6 % for collimator scatter at 140.5 keV and 511 keV, see
    [`examples/analytic_vs_mc`](examples/analytic_vs_mc/ReadMe.md). `-model legacy` runs the previous
-   kernels (one scatter point per crystal or hole).
+   kernels (one scatter point per crystal or hole), which were off by factors of 0.002–24 in that example.
 
 ### (Optional) Calculate Inter-Crystal Primary Compton System Matrix
 
