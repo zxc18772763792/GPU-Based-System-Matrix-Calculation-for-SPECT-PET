@@ -26,7 +26,8 @@ shield_outside_collimator = absorber
 
 histories_per_voxel = 4000000
 # center: point source at the voxel centre, as in the analytic kernels (uniform for production:
-# with 2 mm voxels it changes this matrix by ~4 % in sensitivity and ~9 % in shape)
+# with 2 mm voxels it changes this matrix by < 1 % in total sensitivity, -5..+3 % per voxel and
+# ~9 % in shape (TVD), because the pinhole images of a 2 mm voxel are blurred)
 source_sampling     = center
 direction_sampling  = rect
 detector_bias       = auto

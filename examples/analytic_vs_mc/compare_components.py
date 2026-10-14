@@ -90,7 +90,8 @@ HEAD = ("| analytic vs MC | Σ analytic | Σ MC | ratio A/MC | per-voxel ratio: 
 
 
 def svg_flood(path, xtal, panels, ncol):
-    """panels: list of (title, flood[nDet] or None). Crystal rectangles at their (x, z) positions."""
+    """panels: list of (title, flood[nDet] or None). Crystal rectangles at their (x, z) positions,
+    each panel scaled from its own minimum to its own maximum (the sums are printed in the titles)."""
     x, z, w, h = xtal[:, 0], xtal[:, 2], xtal[:, 3], xtal[:, 5]
     x0, x1 = (x - w / 2).min(), (x + w / 2).max()
     z0, z1 = (z - h / 2).min(), (z + h / 2).max()
@@ -109,9 +110,10 @@ def svg_flood(path, xtal, panels, ncol):
             out.append(f'<text x="{ox:.1f}" y="{oy + 12 + 12 * j:.1f}">{t}</text>')
         if f is None:
             continue
-        m = f.max() if f.max() > 0 else 1.0
+        lo, hi = float(f.min()), float(f.max())
+        span = hi - lo if hi > lo else 1.0
         for i in range(len(f)):
-            v = max(0.0, min(1.0, f[i] / m)) ** 0.5           # sqrt scale: shows the scatter tails
+            v = max(0.0, min(1.0, (f[i] - lo) / span)) ** 0.5  # min..max of each panel, sqrt scale
             c = int(255 * (1 - v))
             rx = ox + (x[i] - w[i] / 2 - x0) * S
             ry = oy + top + (z1 - (z[i] + h[i] / 2)) * S      # +z up
@@ -165,13 +167,15 @@ def main():
         if not os.path.exists(os.path.join(d, f"{run}_win0_total.sysmat")):
             continue
         summ = os.path.join(d, f"{run}_summary.json")
-        desc = ""
+        desc, wins = "", []
         if os.path.exists(summ):
             with open(summ) as fh:
                 js = json.load(fh)
+            wins = js.get("windows", [])
             desc = (f"physics {js.get('physics')}, Rayleigh {js.get('rayleigh')}, fluorescence {js.get('fluorescence')}, "
                     f"{js.get('total_histories', 0):.3g} histories; " + "; ".join(js.get("materials", [])))
-        for k, (an, label) in enumerate([(AN, "photopeak window (Param_Physics)"), (wide, "wide window 60-200 keV")]):
+        wide_label = f"wide window {wins[1]['lo']:g}-{wins[1]['hi']:g} keV" if len(wins) > 1 else "window 1"
+        for k, (an, label) in enumerate([(AN, "photopeak window (Param_Physics)"), (wide, wide_label)]):
             f = lambda c: os.path.join(d, f"{run}_win{k}_{c}.sysmat")
             if an is None or not os.path.exists(f("total")):
                 continue
