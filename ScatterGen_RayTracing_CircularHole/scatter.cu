@@ -2067,6 +2067,9 @@ __global__ void geometryRelationShip_Collimator2Crystal(unsigned int* dst_relati
 #ifndef S2_CHORD_N
 #define S2_CHORD_N 4          //   ... and at least S2_CHORD_N cells per face edge
 #endif
+#ifndef S2_WIN_SUB
+#define S2_WIN_SUB 3          //   energy window: S2_WIN_SUB^2 sub-points per cell where the energies reach an edge of the
+#endif                        //   window (4 sigma) and change by more than sigma/4 across a cell
 #ifndef S2_CHORD_SUB
 #define S2_CHORD_SUB 4        //   chord through the detector crystal: S2_CHORD_SUB^2 sub-points in cells next to the edges
 #endif                        //   the rays run towards (there the chord drops to 0 through the side face)
@@ -2335,9 +2338,10 @@ __device__ float s2wallDist(const float* col, const S2Col& L, const S2Hash& H, i
 // for a photon that arrived at p along din and scatters there.  A face is divided into cells of
 // equal angular size seen from p (edges at hd*tan(angle)), at most S2_CELL_ANG rad and at least
 // S2_CHORD_N per edge: scatter angle, energy, window and att.nearTau (crystals next to I) at the
-// centre of every cell, exact solid angle of every cell, chord through I by s2cellAbsorb.  At
+// centre of every cell, exact solid angle of every cell, chord through I by s2cellAbsorb, window
+// averaged over sub-points where the energies reach an edge of the window (s2windowEdge).  At
 // 511 keV the lower edge of a wide window lies near 90 deg, i.e. towards the neighbouring
-// crystals, so the window changes quickly across a near face.  The collimator attenuation
+// crystals, and in the photopeak window all of the scatter comes from angles around its edge.  The collimator attenuation
 // (att.farParts) is traced once per patch of cells (at most S2_PATCH_ANG rad) and scaled to the
 // energy of every cell.
 __device__ inline float s2cellEdge(float e0, float e1, float a0, float a1, int k, int n, float hd) {
@@ -2345,14 +2349,17 @@ __device__ inline float s2cellEdge(float e0, float e1, float a0, float a1, int k
 }
 // Mean photo-absorption probability (1 - exp(-mT * chord)) over the cell [qu0, qu1] x [qv0, qv1] of
 // face A of I (local coordinates), rays from pl through the cell centre q along e.  The chord is
-// 2 h_A / |e_A| except within C |e_U| (C |e_V|) of the edge the rays run towards, where it drops
-// linearly to 0; cells reaching such a strip are sampled on S2_CHORD_SUB^2 sub-points.
+// 2 h_A / |e_A| except within the strip C |e_U| (C |e_V|) of the edge the rays run towards, where it
+// drops linearly to 0; cells reaching such a strip are sampled on S2_CHORD_SUB^2 sub-points (with
+// their own directions: at grazing incidence the chord also changes with the direction).
 __device__ float s2cellAbsorb(S2V pl, S2V q, S2V e, const S2Box& I, int A, int U, int V,
                               float qu0, float qu1, float qv0, float qv1, float mT) {
     float C = 2.0f * s2get(I.h, A) / fmaxf(fabsf(s2get(e, A)), 1e-12f);
     float eu = s2get(e, U), ev = s2get(e, V), hu = s2get(I.h, U), hv = s2get(I.h, V);
-    bool edge = (eu > 0.0f ? qu1 > hu - C * eu : qu0 < -hu - C * eu) || (ev > 0.0f ? qv1 > hv - C * ev : qv0 < -hv - C * ev);
-    if (!edge) return 1.0f - expf(-mT * s2exit(q, e, I.h));
+    float wu = C * fabsf(eu), wv = C * fabsf(ev);                        // strip widths
+    bool su = eu > 0.0f ? qu1 > hu - wu : (eu < 0.0f && qu0 < -hu + wu);
+    bool sv = ev > 0.0f ? qv1 > hv - wv : (ev < 0.0f && qv0 < -hv + wv);
+    if (!su && !sv) return 1.0f - expf(-mT * s2exit(q, e, I.h));
     float sum = 0.0f;
     for (int a = 0; a < S2_CHORD_SUB; ++a)
         for (int b = 0; b < S2_CHORD_SUB; ++b) {
@@ -2363,6 +2370,51 @@ __device__ float s2cellAbsorb(S2V pl, S2V q, S2V e, const S2Box& I, int A, int U
             sum += 1.0f - expf(-mT * s2exit(r, s2mul(d, 1.0f / s2len(d)), I.h));
         }
     return sum / (S2_CHORD_SUB * S2_CHORD_SUB);
+}
+// Must the energy window be averaged over sub-points in the cells of the rectangle [u0, u1] x [v0, v1]
+// of face A (local coordinates, ncell cells along its longer side)?  Yes if the energies scattered
+// from p (direction dl) into it reach an edge zone of the window (4 sigma of the resolution) and
+// change by more than sigma/4 across a cell.  The scatter angle is checked at the corners, the
+// centre and the point the incoming direction points at.
+__device__ bool s2windowEdge(S2V pl, S2V dl, const S2Phys& P, int A, int U, int V, float fa, float u0, float u1, float v0, float v1, int ncell) {
+    if (P.R0 <= 0.0f) return true;
+    float ctmin = 1.0f, ctmax = -1.0f;
+    float t = (fa - s2get(pl, A)) / (fabsf(s2get(dl, A)) > 1e-12f ? s2get(dl, A) : 1e-12f);
+    for (int k = 0; k < 6; ++k) {
+        S2V q = pl;
+        s2put(q, A, fa);
+        float qu = k < 4 ? ((k & 1) ? u1 : u0) : 0.5f * (u0 + u1), qv = k < 4 ? ((k & 2) ? v1 : v0) : 0.5f * (v0 + v1);
+        if (k == 5) {
+            if (t <= 0.0f) continue;
+            qu = fminf(fmaxf(s2get(pl, U) + t * s2get(dl, U), u0), u1);
+            qv = fminf(fmaxf(s2get(pl, V) + t * s2get(dl, V), v0), v1);
+        }
+        s2put(q, U, qu);
+        s2put(q, V, qv);
+        S2V e = s2sub(q, pl);
+        float ct = s2dot(dl, e) / s2len(e);
+        ctmin = fminf(ctmin, ct);
+        ctmax = fmaxf(ctmax, ct);
+    }
+    float Elo = P.E0 / (1.0f + P.a0 * (1.0f - ctmin)), Ehi = P.E0 / (1.0f + P.a0 * (1.0f - ctmax));
+    float sl = P.R0 * sqrtf(P.E0 / P.lo) * P.lo / 2.35482f, sh = P.R0 * sqrtf(P.E0 / P.hi) * P.hi / 2.35482f;
+    bool nlo = Ehi > P.lo - 4.0f * sl && Elo < P.lo + 4.0f * sl, nhi = Ehi > P.hi - 4.0f * sh && Elo < P.hi + 4.0f * sh;
+    float sig = nlo ? (nhi ? fminf(sl, sh) : sl) : (nhi ? sh : -1.0f);
+    return sig > 0.0f && Ehi - Elo > 0.25f * sig * ncell;
+}
+// Mean window probability over the cell [qu0, qu1] x [qv0, qv1] of face A (S2_WIN_SUB^2 sub-points)
+__device__ float s2cellWindow(S2V pl, S2V dl, S2V q, const S2Phys& P, int U, int V, float qu0, float qu1, float qv0, float qv1) {
+    float sum = 0.0f;
+    for (int a = 0; a < S2_WIN_SUB; ++a)
+        for (int b = 0; b < S2_WIN_SUB; ++b) {
+            S2V r = q;
+            s2put(r, U, qu0 + (qu1 - qu0) * (a + 0.5f) / S2_WIN_SUB);
+            s2put(r, V, qv0 + (qv1 - qv0) * (b + 0.5f) / S2_WIN_SUB);
+            S2V e = s2sub(r, pl);
+            float ct = s2dot(dl, e) / s2len(e);
+            sum += s2window(P.E0 / (1.0f + P.a0 * (1.0f - ct)), P.lo, P.hi, P.R0, P.E0);
+        }
+    return sum / (S2_WIN_SUB * S2_WIN_SUB);
 }
 template <class Att>
 __device__ float s2toCrystal(S2V p, S2V din, const S2Phys& P, const S2Box& I, S2Mu muI, const Att& att) {
@@ -2393,7 +2445,10 @@ __device__ float s2toCrystal(S2V p, S2V din, const S2Phys& P, const S2Box& I, S2
                     S2V cw = s2toWorld(I, c);
                     att.farParts(p, cw, tpe, tc, th);
                 }
-                float u1 = s2cellEdge(eu0, eu1, au0, au1, iu * mu_, Nu, hd);
+                float pu0 = s2cellEdge(eu0, eu1, au0, au1, iu * mu_, Nu, hd), pu1 = s2cellEdge(eu0, eu1, au0, au1, (iu + 1) * mu_, Nu, hd);
+                float pv0 = s2cellEdge(ev0, ev1, av0, av1, iv * mv_, Nv, hd), pv1 = s2cellEdge(ev0, ev1, av0, av1, (iv + 1) * mv_, Nv, hd);
+                bool edgeW = s2windowEdge(pl, dl, P, A, U, V, sgn * ha, pu + pu0, pu + pu1, pv + pv0, pv + pv1, max(mu_, mv_));
+                float u1 = pu0;
                 for (int a = iu * mu_; a < (iu + 1) * mu_; ++a) {
                     float u0 = u1;
                     u1 = s2cellEdge(eu0, eu1, au0, au1, a + 1, Nu, hd);
@@ -2411,7 +2466,8 @@ __device__ float s2toCrystal(S2V p, S2V din, const S2Phys& P, const S2Box& I, S2
                         e = s2mul(e, 1.0f / s2len(e));
                         float ct = s2dot(dl, e);
                         float Es = P.E0 / (1.0f + P.a0 * (1.0f - ct));
-                        float w = s2window(Es, P.lo, P.hi, P.R0, P.E0);
+                        float w = edgeW ? s2cellWindow(pl, dl, q, P, U, V, pu + u0, pu + u1, pv + v0, pv + v1)
+                                        : s2window(Es, P.lo, P.hi, P.R0, P.E0);
                         if (w < 1e-9f) continue;
                         float r = P.E0 / Es, r3 = r * r * r, rc = s2knTotal(Es / 511.0f) * P.knTot0Inv;
                         float mPE = muI.pe * r3, mT = mPE + muI.c * rc;
