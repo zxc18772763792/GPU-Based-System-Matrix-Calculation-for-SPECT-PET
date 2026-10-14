@@ -84,6 +84,9 @@ def main():
     ap.add_argument("--fov2col", type=float, default=40.0)
     ap.add_argument("--rotations", type=int, default=1)
     ap.add_argument("--eres", type=float, default=0.10, help="FWHM energy resolution at E0")
+    ap.add_argument("--window", type=float, nargs=2, metavar=("LO", "HI"),
+                    help="fixed energy window in keV for all crystals (Param_Physics[4]=1); "
+                         "default: per crystal (1 -/+ eres/2) E0")
     args = ap.parse_args()
 
     grid, mats = load_db(args.db)
@@ -136,7 +139,8 @@ def main():
     img = [nx, ny, nz, args.voxel, args.voxel, args.voxel, args.rotations,
            2 * math.pi / args.rotations, 0.0, 0.0, 0.0, args.fov2col]
     write(os.path.join(args.out, "Params_Image.dat"), img, 100)
-    phy = [1, 1, 1, 1, 0, E * (1 - args.eres / 2), E * (1 + args.eres / 2), E, 1, 1]
+    lo, hi = args.window if args.window else (E * (1 - args.eres / 2), E * (1 + args.eres / 2))
+    phy = [1, 1, 1, 1, 1 if args.window else 0, lo, hi, E, 1, 1]
     write(os.path.join(args.out, "Params_Physics.dat"), phy, 100)
 
     print(f"wrote {args.out}/Params_*.dat")
@@ -145,6 +149,7 @@ def main():
     print(f"  {n}x{n} {args.crystal} crystals {args.crystal_size}x{args.thickness}x{args.crystal_size} mm, "
           f"mu={dt:.4f}/mm (PE {dpe:.4f}, Compton {dc:.4f})")
     print(f"  FOV {nx}x{ny}x{nz} voxels of {args.voxel} mm, {args.rotations} rotation(s), FOV->collimator {args.fov2col} mm")
+    print(f"  energy window {lo:.2f}-{hi:.2f} keV" + ("" if args.window else " (per crystal from eres)"))
 
 
 if __name__ == "__main__":

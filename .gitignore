@@ -16,3 +16,5 @@ ScatterGen_*/ScatterGen_CircularHole
 ScatterGen_*/ScatterGen_Collimator
 ScatterGen_*/ScatterGen_Crystal
 __pycache__/
+tools/analytic_cpu/build/
+examples/analytic_vs_mc/run_*/

@@ -225,14 +225,17 @@ python3 tools/gen_material_db.py --add "LuAG:Lu3Al5O12:6.73" --add "Steel:MIX(Fe
    make cpu && python3 tests/reference_mc.py --energy 140.5 --material NaI
    python3 tests/reference_mc.py --energy 511 --material LYSO --thickness 15
    ```
-5. **准直板边缘（511 keV 重要）**：小准直板 (30 mm, 10 mm W) + 60 mm LYSO 阵列时，MC (`absorber`) 只有解析值的
-   75%。按中心射线分类：穿过板前后表面的射线 MC/解析 = 0.97；**从板侧面穿出**的射线解析给出 1.8e-2、MC 为 1.3e-3。
-   原因是解析内核对“碰到板”的射线按完整厚度 T/cosθ 衰减（相当于板向外延伸），而完全错过板的射线又被
-   视为全挡。用 `shield_outside_collimator = slab` 时，前后表面射线 1.002、侧面射线 1.095，但错过板的射线
-   变为 3.2e-3（解析为 0）。140.5 keV 下钨几乎不透明，两者差别可忽略；**511 keV 下请按实际屏蔽选择模式**，
-   或让准直板覆盖所有视线。
+5. **准直板边缘 / 屏蔽约定**：解析模型约定光子**从入射窗（板的前表面）入射**，按完整厚度 T/cosθ 衰减，
+   相当于板在侧向无限延伸、板外完全屏蔽；准直板应覆盖所有 视野→晶体 视线，解析结果才有意义。
+   MC 则需要给出屏蔽结构的具体细节：`absorber` 与解析约定一致（板外全吸收），`slab` 为同材料外框，
+   `none` 为无屏蔽，真实系统请按实际的屏蔽体选择/设置。参考数据（小准直板 30 mm、10 mm W + 60 mm LYSO，
+   511 keV，板没有覆盖所有视线）：MC (`absorber`) 为解析值的 75%，差别全部来自从板侧面穿出的射线
+   （解析 1.8e-2、MC 1.3e-3，穿过前后表面的射线 MC/解析 = 0.97）；`slab` 时前后表面 1.002、侧面 1.095，
+   错过板的射线为 3.2e-3（解析为 0）。140.5 keV 下钨几乎不透明，差别可忽略。
 6. **能谱**：140.5 keV / NaI / W 针孔板中可见 140.5 keV 光电峰、111.9 keV 碘逃逸峰、59.3 keV W Kα、
    28–33 keV 碘 K X 射线的晶体间串扰。
+7. **解析 PE + 散射 与 MC 的分量对比示例**：见 [`examples/analytic_vs_mc`](../examples/analytic_vs_mc/ReadMe.md)
+   （140.5 keV 与 511 keV，单卡 GPU 或 CPU 运行）。
 
 > 本仓库在无 GPU 的环境中开发：CUDA 后端已用 nvcc 编译链接，物理与几何代码与 CPU 后端为同一份并已验证，
 > 但多 GPU 运行速度尚未实测，请在你的机器上先用小的 `histories_per_voxel` 试运行。

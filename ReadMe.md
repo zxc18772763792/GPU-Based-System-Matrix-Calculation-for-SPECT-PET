@@ -94,10 +94,14 @@ This project provides a GPU-based framework for calculating system matrices esse
      -PE <path_to_PE_SystemMatrix> \
      -GeoCrystal <path_to_CrystalGeometryRelationship> \
      -GeoCollimator <path_to_CollimatorGeometryRelationship> \
-     -cuda <cuda_device_id>
+     -cuda <cuda_device_id> \
+     [-components]
    ```
 
-   Replace placeholders with the actual paths and CUDA device ID.
+   Replace placeholders with the actual paths and CUDA device ID. With `-components` the crystal-scatter
+   and collimator-scatter parts are also written separately (`Scatter_Crystal_SysMat_shift_*.sysmat`,
+   `Scatter_Collimator_SysMat_shift_*.sysmat`). The PE file name written by PEGen ends in `_v3.sysmat`,
+   so pass it with `-PE`.
 
 ### (Optional) Calculate Inter-Crystal Primary Compton System Matrix
 
@@ -142,6 +146,14 @@ See [MCGen_MultiGPU/ReadMe.md](MCGen_MultiGPU/ReadMe.md) for physics, variance r
 configuration keys, the material database (W, Pb, W alloys, Au, Pt, NaI, CsI, LYSO, BGO, GAGG, CZT,
 LaBr3, …) and the validation results. `tools/make_demo_params.py` writes a small demo geometry and
 `tools/compare_sysmat.py` compares two system matrices (e.g. analytic vs Monte Carlo).
+
+### Analytic vs Monte Carlo example
+
+[`examples/analytic_vs_mc`](examples/analytic_vs_mc/ReadMe.md) runs PEGen + ScatterGen and
+MCGen_MultiGPU on one GPU for a small multi-pinhole system at 140.5 keV and 511 keV and compares the
+photoelectric, crystal-scatter and collimator-scatter components (`./run_example.sh tc99m gpu`).
+Without a GPU, `./run_example.sh tc99m cpu` runs the original analytic CUDA kernels compiled for the
+CPU ([`tools/analytic_cpu`](tools/analytic_cpu/build.py)) and the CPU build of the Monte Carlo code.
 
 ### Element Visualizer
 

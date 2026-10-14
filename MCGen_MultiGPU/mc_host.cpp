@@ -405,7 +405,8 @@ bool Simulation::setup(std::string& err) {
     std::string phys = lower(cfg.str("physics", "full"));
     if (phys != "full" && phys != "primary_pe") { err = "physics must be full | primary_pe"; return false; }
     C.primaryOnly = phys == "primary_pe";
-    C.fluo = !C.primaryOnly && cfg.integer("fluorescence", 1) != 0;
+    bool fluo = cfg.integer("fluorescence", 1) != 0;   // read in every mode (no "unknown key" warning)
+    C.fluo = !C.primaryOnly && fluo;
     bool rayleigh = cfg.integer("rayleigh", 1) != 0;
     C.eCut = (float)cfg.num("energy_cutoff_kev", 10.0);
     C.components = cfg.integer("save_components", 0) != 0;
