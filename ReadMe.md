@@ -109,7 +109,8 @@ This project provides a GPU-based framework for calculating system matrices esse
    for collimator scatter, with exact solid angles of the crystal faces, Klein–Nishina angles and
    energies, and attenuation of the scattered photon in the crystals and the collimator. Against the
    first-order Monte Carlo of `MCGen_MultiGPU` (`physics = single_scatter`, same physics definition) it
-   agrees within 5 % for crystal scatter and 6 % for collimator scatter at 140.5 keV and 511 keV, see
+   agrees within 3 % for crystal scatter and 5 % for collimator scatter at 140.5 keV (1 % for both at
+   511 keV), photopeak and wide energy windows, see
    [`examples/analytic_vs_mc`](examples/analytic_vs_mc/ReadMe.md). `-model legacy` runs the previous
    kernels (one scatter point per crystal or hole), which were off by factors of 0.002–24 in that example.
 
