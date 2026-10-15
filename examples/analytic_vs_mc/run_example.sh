@@ -11,7 +11,8 @@
 #   cpu:           the same analytic kernels compiled for the CPU (tools/analytic_cpu) and MCGen_CPU
 #                  (cd MCGen_MultiGPU && make cpu); ~10-20 min per case on 4 cores
 #
-# Results: run_<case>/report.md (tables), run_<case>/flood.svg (detector images), run_<case>/report.json
+# Results: run_<case>/report.md (tables), run_<case>/flood.svg (detector images), run_<case>/report.json,
+#          run_<case>/timing.md (wall time of every step, MC throughput)
 set -euo pipefail
 
 CASE=${1:-tc99m}
@@ -38,6 +39,11 @@ case "$CASE" in
 esac
 
 need() { [ -x "$1" ] || { echo "missing $1 - $2"; exit 1; }; }
+# wall time of every step -> timing.md
+now() { date +%s.%N; }
+STEPS=""; LAST=$(now)
+lap() { local t; t=$(now); STEPS="$STEPS| $1 | $(awk -v a="$LAST" -v b="$t" 'BEGIN{printf "%.1f", b-a}') |
+"; LAST=$t; }
 if [ "$MODE" = gpu ]; then
   PEGEN=$ROOT/PEGen_RayTracing_CircularHole/PEGen_CircularHole
   SCGEN=$ROOT/ScatterGen_RayTracing_CircularHole/ScatterGen_CircularHole
@@ -68,15 +74,18 @@ EOF
 
 PE=PE_SysMat_shift_${SHIFT}_v3.sysmat
 echo "== analytic model ($MODE)"
+LAST=$(now)
 if [ "$MODE" = gpu ]; then
-  (cd "$OUT" && "$PEGEN" -cuda "$GPU" > pegen.log)
+  (cd "$OUT" && "$PEGEN" -cuda "$GPU" > pegen.log); lap "PEGen (PE matrix)"
   (cd "$OUT" && "$SCGEN" -PE "$PE" -cuda "$GPU" -components -model "$SCATTER_MODEL" > scattergen.log)
+  lap "ScatterGen $SCATTER_MODEL, photopeak window"
   (cd "$OUT/wide" && "$SCGEN" -PE "../$PE" -cuda "$GPU" -components -model "$SCATTER_MODEL" > scattergen.log)
+  lap "ScatterGen $SCATTER_MODEL, wide window"
 else
   B=$ROOT/tools/analytic_cpu/build
-  "$B/pe_cpu" "$OUT"
-  "$B/scatter_cpu" "$OUT" "$OUT/$PE" -model "$SCATTER_MODEL"
-  "$B/scatter_cpu" "$OUT/wide" "$OUT/$PE" -model "$SCATTER_MODEL"
+  "$B/pe_cpu" "$OUT"; lap "PE matrix (CPU build of PEGen)"
+  "$B/scatter_cpu" "$OUT" "$OUT/$PE" -model "$SCATTER_MODEL"; lap "scatter $SCATTER_MODEL, photopeak window"
+  "$B/scatter_cpu" "$OUT/wide" "$OUT/$PE" -model "$SCATTER_MODEL"; lap "scatter $SCATTER_MODEL, wide window"
 fi
 
 echo "== Monte Carlo ($MODE, $NH histories per voxel)"
@@ -86,16 +95,35 @@ cd "$OUT"
 #    counted only if its first interaction is photoelectric, ideal window -> checks the PE kernel
 "$MC" "$CFG" $MCARGS -output_prefix mc_pe -collimator_material params -crystal_material params -hole_material vacuum \
       -physics primary_pe -ewin_mode ideal -windows params -save_components 0 -histories_per_voxel "$NH" > mc_pe.log
+lap "MC mc_pe (primary_pe)"
 # 2) first-order scatter with the same physics as the analytic model: at most one Compton scatter,
 #    only photoelectric absorption scored -> exact reference for ScatterGen model v2
 "$MC" "$CFG" $MCARGS -output_prefix mc_single -collimator_material params -crystal_material params -hole_material vacuum \
       -physics single_scatter -windows "params,$WIDE_LO-$WIDE_HI" -histories_per_voxel "$NH" > mc_single.log
+lap "MC mc_single (single_scatter)"
 # 3) Compton + photoelectric only, coefficients and E^-3 / Klein-Nishina scaling from the parameter
 #    files, no Rayleigh, no fluorescence: the physics the analytic scatter models assume
 "$MC" "$CFG" $MCARGS -output_prefix mc_model -collimator_material params -crystal_material params -hole_material vacuum \
       -rayleigh 0 -fluorescence 0 -windows "params,$WIDE_LO-$WIDE_HI" -histories_per_voxel "$NH" > mc_model.log
+lap "MC mc_model (Compton + photoelectric)"
 # 4) full physics with the material database (Rayleigh, K fluorescence, exact cross sections)
 "$MC" "$CFG" $MCARGS $MATS -output_prefix mc_full -windows "params,$WIDE_LO-$WIDE_HI" -histories_per_voxel "$NH" > mc_full.log
+lap "MC mc_full (full physics)"
+
+DEV="CPU, $(nproc) threads"
+[ "$MODE" = gpu ] && DEV=$(nvidia-smi --query-gpu=name --format=csv,noheader -i "$GPU" 2>/dev/null || echo "GPU $GPU")
+{
+  echo "# Timing: $CASE, $MODE ($DEV), $NH histories per voxel, scatter model $SCATTER_MODEL"
+  echo
+  echo "| step | wall time (s) |"
+  echo "|---|---|"
+  printf "%s" "$STEPS"
+  echo
+  echo "MC throughput:"
+  echo
+  for r in mc_pe mc_single mc_model mc_full; do echo "* $r: $(grep -h '^Done:' $r.log | tail -1)"; done
+} > timing.md
+cat timing.md
 
 echo "== comparison"
 python3 "$HERE/compare_components.py" "$OUT" --wide "$OUT/wide" --md "$OUT/report.md" --svg "$OUT/flood.svg" --json "$OUT/report.json"

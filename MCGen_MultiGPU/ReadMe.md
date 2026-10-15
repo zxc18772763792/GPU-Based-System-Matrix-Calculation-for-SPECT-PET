@@ -236,7 +236,7 @@ python3 tools/gen_material_db.py --add "LuAG:Lu3Al5O12:6.73" --add "Steel:MIX(Fe
    28–33 keV 碘 K X 射线的晶体间串扰。
 7. **解析 PE + 散射 与 MC 的分量对比示例**：见 [`examples/analytic_vs_mc`](../examples/analytic_vs_mc/ReadMe.md)
    （140.5 keV 与 511 keV，单卡 GPU 或 CPU 运行）。`physics = single_scatter` 与 ScatterGen 散射模型 v2 的物理定义
-   完全相同，两者的晶体散射、准直器散射在 ≤ 6 % 内一致；`full` 物理下的散射/主成分比约为一阶模型的 2 倍
+   完全相同，两者的晶体散射在 ≤ 3 %、准直器散射在 ≤ 5 % 内一致（511 keV 均 ≤ 1 %）；`full` 物理下的散射/主成分比约为一阶模型的 2 倍
    （多次散射、瑞利散射、K 荧光、同一晶体内的多次相互作用）。
 
 > 本仓库在无 GPU 的环境中开发：CUDA 后端已用 nvcc 编译链接，物理与几何代码与 CPU 后端为同一份并已验证，
