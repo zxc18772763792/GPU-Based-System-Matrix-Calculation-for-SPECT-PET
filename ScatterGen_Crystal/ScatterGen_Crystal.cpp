@@ -169,7 +169,7 @@ int main(int argc, char* argv[])
 
 		parameter_Image[20] = float(idxRotation);
 
-		int q = scatter(parameter_Detector, parameter_Image, parameter_Physics, PE_SysMat, FnameGeo.c_str(), out + idxRotation * numProjectionSingle * numImagebin, cuda_id);
+		int q = scatter(parameter_Detector, parameter_Image, parameter_Physics, PE_SysMat + idxRotation * numProjectionSingle * numImagebin, FnameGeo.c_str(), out + idxRotation * numProjectionSingle * numImagebin, cuda_id);
 
 		printf("numImagebin = %d\n", q);
 	}

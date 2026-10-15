@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SPECT/PET Element Viewer</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3" fill="currentColor"/><path d="M12 1v5M12 18v5M1 12h5M18 12h5" stroke="currentColor" stroke-width="2"/></svg>
+      <span data-i18n="title">SPECT/PET 元素可视化</span>
+    </div>
+    <label class="btn primary" title="Params_*.dat, *.sysmat, *_spectrum.csv, *_tracks.json, *_summary.json">
+      <input type="file" id="fileInput" multiple hidden>
+      <span data-i18n="openFiles">打开文件…</span>
+    </label>
+    <label class="btn"><input type="file" id="dirInput" webkitdirectory hidden><span data-i18n="openDir">打开目录…</span></label>
+    <button class="btn" id="demoBtn" data-i18n="demo">示例几何</button>
+    <div id="status" class="status" role="status"></div>
+    <div class="spacer"></div>
+    <button class="btn ghost" id="langBtn" title="中文 / English">EN</button>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <section class="card" id="secData">
+        <h3 data-i18n="secData">数据</h3>
+        <div id="fileChips" class="chips"></div>
+        <div id="serverBox" hidden>
+          <div class="row"><span class="muted" data-i18n="serverFiles">服务器文件</span><span id="serverRoot" class="muted small"></span></div>
+          <div id="serverList" class="filelist"></div>
+        </div>
+        <table class="kv" id="summaryTable"></table>
+      </section>
+
+      <section class="card" id="secDisplay">
+        <h3 data-i18n="secDisplay">显示</h3>
+        <div class="checks">
+          <label><input type="checkbox" id="showPlates" checked> <span data-i18n="plates">准直器板</span></label>
+          <label><input type="checkbox" id="showHoles" checked> <span data-i18n="holes">准直孔</span></label>
+          <label><input type="checkbox" id="showCrystals" checked> <span data-i18n="crystals">晶体</span></label>
+          <label><input type="checkbox" id="showFov" checked> <span data-i18n="fov">成像视野</span></label>
+          <label><input type="checkbox" id="showVoxels"> <span data-i18n="voxelValues">体素数值</span></label>
+          <label><input type="checkbox" id="showTracks" checked> <span data-i18n="tracks">MC 光子径迹</span></label>
+          <label><input type="checkbox" id="showAxes" checked> <span data-i18n="axes">坐标轴</span></label>
+          <label><input type="checkbox" id="showDisabled"> <span data-i18n="disabledXtals">未启用晶体</span></label>
+        </div>
+        <label class="field"><span data-i18n="plateOpacity">准直器透明度</span>
+          <input type="range" id="plateOpacity" min="0.05" max="1" step="0.05" value="0.3"></label>
+        <label class="field"><span data-i18n="colorBy">晶体着色</span>
+          <select id="colorBy">
+            <option value="muTot" data-i18n="cMuTot">总衰减系数 μ</option>
+            <option value="peFrac" data-i18n="cPeFrac">光电比例 μPE/μ</option>
+            <option value="eres" data-i18n="cEres">能量分辨率</option>
+            <option value="flag" data-i18n="cFlag">标志 (flag)</option>
+            <option value="rot" data-i18n="cRot">旋转角</option>
+            <option value="y" data-i18n="cDepth">深度 y</option>
+            <option value="index" data-i18n="cIndex">编号</option>
+            <option value="projection" data-i18n="cProjection">所选体素的投影</option>
+            <option value="detSum" data-i18n="cDetSum">探测器灵敏度 (Σ体素)</option>
+          </select></label>
+        <div class="row2">
+          <label class="field"><span data-i18n="colormap">色表</span><select id="cmap"></select></label>
+          <label class="field inline"><input type="checkbox" id="logScale"> <span data-i18n="logScale">对数</span></label>
+        </div>
+        <label class="field"><span data-i18n="clip">剖切面</span>
+          <span class="row2"><select id="clipAxis"><option value="">—</option><option value="x">x</option><option value="y">y</option><option value="z">z</option></select>
+          <input type="range" id="clipPos" min="0" max="1" step="0.001" value="0.5">
+          <label class="inline"><input type="checkbox" id="clipFlip"> <span data-i18n="flip">反向</span></label></span></label>
+        <label class="field"><span><span data-i18n="rotation">旋转位置</span> <b id="rotLabel">0</b></span>
+          <input type="range" id="rotIndex" min="0" max="0" step="1" value="0"></label>
+        <div class="field"><span data-i18n="views">视角（视线方向）</span></div>
+        <div class="btnrow views">
+          <button class="btn sm" data-view="iso" data-i18n="vIso" data-i18n-title="vIsoT">等轴</button>
+          <button class="btn sm" data-view="beam" data-i18n="vBeam" data-i18n-title="vBeamT">沿 +y</button>
+          <button class="btn sm" data-view="beamR" data-i18n="vBeamR" data-i18n-title="vBeamRT">沿 −y</button>
+          <button class="btn sm" data-view="axial" data-i18n="vAxial" data-i18n-title="vAxialT">沿 −z</button>
+          <button class="btn sm" data-view="side" data-i18n="vSide" data-i18n-title="vSideT">沿 −x</button>
+          <button class="btn sm" id="fitBtn" data-i18n="vFit">适配</button>
+        </div>
+        <div class="row2">
+          <label class="field inline"><span data-i18n="upAxis">竖直轴</span>
+            <select id="upAxis"><option value="z">z</option><option value="y">y</option></select></label>
+          <label class="field inline"><input type="checkbox" id="orthoCam"> <span data-i18n="ortho">正交</span></label>
+        </div>
+        <div class="muted small" id="viewNote"></div>
+      </section>
+
+      <section class="card" id="secSysmat">
+        <h3 data-i18n="secSysmat">系统矩阵</h3>
+        <label class="field"><span data-i18n="sysmatFile">文件</span><select id="sysmatSel"></select></label>
+        <div id="sysmatInfo" class="muted small"></div>
+        <div class="row2">
+          <label class="field"><span data-i18n="detector">探测器 #</span><input type="number" id="detIdx" min="0" value="0"></label>
+          <label class="field"><span data-i18n="voxel">体素 #</span><input type="number" id="voxIdx" min="0" value="0"></label>
+        </div>
+        <div class="btnrow">
+          <button class="btn sm" id="rowBtn" data-i18n="showRow">探测器响应</button>
+          <button class="btn sm" id="colBtn" data-i18n="showCol">体素投影</button>
+          <button class="btn sm" id="sensBtn" data-i18n="showSens">灵敏度图</button>
+        </div>
+        <div class="progress" id="progress" hidden><div></div></div>
+      </section>
+
+      <section class="card" id="secMC">
+        <h3 data-i18n="secMC">蒙特卡洛</h3>
+        <table class="kv" id="mcTable"></table>
+        <div class="row2">
+          <label class="field"><span data-i18n="specMode">能谱</span>
+            <select id="specMode"><option value="blur" data-i18n="specBlur">能量展宽后</option><option value="raw" data-i18n="specRaw">沉积能量</option></select></label>
+          <label class="field inline"><input type="checkbox" id="specLog" checked> <span data-i18n="logScale">对数</span></label>
+        </div>
+      </section>
+
+      <section class="card" id="secChecks">
+        <h3 data-i18n="secChecks">一致性检查</h3>
+        <ul id="checkList" class="checklist"></ul>
+      </section>
+    </aside>
+
+    <div class="center">
+      <div class="viewport" id="viewport">
+        <canvas id="gl"></canvas>
+        <canvas id="ov3d" class="overlay3d"></canvas>
+        <div class="legend" id="legend"></div>
+        <div class="hint" id="hint3d" data-i18n="dropHint">拖入参数文件 (Params_*.dat)、系统矩阵 (*.sysmat) 或 MC 输出，或点击“示例几何”。</div>
+      </div>
+      <div class="panel2d">
+        <div class="tabs" role="tablist">
+          <button class="tab active" data-tab="layout" data-i18n="tabLayout">布局 x–z</button>
+          <button class="tab" data-tab="image" data-i18n="tabImage">体素图像</button>
+          <button class="tab" data-tab="spectrum" data-i18n="tabSpectrum">能谱</button>
+          <span class="spacer"></span>
+          <span class="tabctl" id="ctlLayout">
+            <label class="inline"><input type="checkbox" id="layoutMirror"> <span data-i18n="layoutMirror">从探测器背面看 (−y)</span></label>
+            <select id="layoutFilter"></select></span>
+          <span class="tabctl" id="ctlImage" hidden>
+            <select id="imgOrient">
+              <option value="phys" data-i18n="oPhys">物理：x→ y↑</option>
+              <option value="numpy" data-i18n="oNumpy">numpy：ix→ iy↓</option>
+              <option value="matlab" data-i18n="oMatlab">MATLAB：iy→ ix↓</option>
+            </select>
+            <span data-i18n="slice">切片</span> <input type="range" id="sliceIdx" min="0" max="0" value="0"></span>
+        </div>
+        <div class="plotwrap"><canvas id="c2d"></canvas><div class="tooltip" id="tip2d" hidden></div></div>
+      </div>
+    </div>
+
+    <aside class="infopanel">
+      <section class="card">
+        <h3 data-i18n="secInfo">元素信息</h3>
+        <div id="info" class="muted" data-i18n="infoHint">在 3D 视图或布局图中点击晶体、准直孔或准直器板。</div>
+      </section>
+      <section class="card help">
+        <h3 data-i18n="secHelp">操作</h3>
+        <ul class="small muted">
+          <li data-i18n="help1">左键拖动：旋转；右键/Shift：平移；滚轮：缩放</li>
+          <li data-i18n="help2">单击：选中元素；双击：以其为中心</li>
+          <li data-i18n="help3">体素图像中单击体素：显示其在各探测器上的投影</li>
+        </ul>
+        <h3 data-i18n="secCoords" style="margin-top:10px">坐标约定</h3>
+        <ul class="small muted">
+          <li data-i18n="coord1">+y：从视野指向准直器和探测器（射束方向）</li>
+          <li data-i18n="coord2">z：视野旋转轴（轴向）；视野绕 +z 逆时针旋转 index × Param_Image[7]</li>
+          <li data-i18n="coord3">晶体绕 y 轴转 Param_Detector[11]：x′ = x cosθ − z sinθ，z′ = x sinθ + z cosθ</li>
+          <li data-i18n="coord4">参数文件中的 y 加上 FOV2Collimator0 (Param_Image[11]) 即世界坐标</li>
+        </ul>
+      </section>
+    </aside>
+  </main>
+  <div class="tooltip" id="tip3d" hidden></div>
+  <div id="dropOverlay" hidden><div data-i18n="dropHere">释放以加载文件</div></div>
+
+  <script src="js/util.js"></script>
+  <script src="js/i18n.js"></script>
+  <script src="js/renderer.js"></script>
+  <script src="js/params.js"></script>
+  <script src="js/data.js"></script>
+  <script src="js/plots.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

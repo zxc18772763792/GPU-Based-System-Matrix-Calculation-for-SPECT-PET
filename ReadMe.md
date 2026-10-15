@@ -12,6 +12,8 @@ A GPU-accelerated system matrix calculation tool designed for SPECT and PET syst
   - [Calculate Photon-Electric System Matrix](#calculate-photon-electric-system-matrix)
   - [Calculate Primary Compton System Matrix](#calculate-primary-compton-system-matrix)
   - [(Optional) Calculate Inter-Crystal Primary Compton System Matrix](#optional-calculate-inter-crystal-primary-compton-system-matrix)
+  - [Monte Carlo System Matrix on Multiple GPUs (140.5 keV / 511 keV)](#monte-carlo-system-matrix-on-multiple-gpus-1405-kev--511-kev)
+  - [Element Visualizer](#element-visualizer)
 - [Parameter Files](#parameter-files)
   - [Param_Collimator.dat](#param_collimatordat)
   - [Param_Detector.dat](#param_detectordat)
@@ -31,6 +33,8 @@ This project provides a GPU-based framework for calculating system matrices esse
 - **Flexible Geometry Support:** Designed to handle complex system geometries.
 - **Modular Structure:** Separate modules for photon-electric and Compton scatter calculations.
 - **Configurable Parameters:** Easily adjustable parameter files to define system configurations.
+- **Multi-GPU Monte Carlo:** `MCGen_MultiGPU` simulates full photon transport (photoelectric + K-fluorescence, Klein–Nishina Compton, Rayleigh, energy-dependent attenuation, energy-resolution windows) for 140.5 keV and 511 keV from the same parameter files, scaling over any number of GPUs.
+- **Element Visualizer:** a zero-dependency browser UI to inspect collimator layers, holes, crystals, the FOV, system-matrix rows/columns/sensitivity maps and Monte Carlo spectra and photon tracks.
 
 ## Prerequisites
 
@@ -90,10 +94,25 @@ This project provides a GPU-based framework for calculating system matrices esse
      -PE <path_to_PE_SystemMatrix> \
      -GeoCrystal <path_to_CrystalGeometryRelationship> \
      -GeoCollimator <path_to_CollimatorGeometryRelationship> \
-     -cuda <cuda_device_id>
+     -cuda <cuda_device_id> \
+     [-components] [-model v2|legacy]
    ```
 
-   Replace placeholders with the actual paths and CUDA device ID.
+   Replace placeholders with the actual paths and CUDA device ID. With `-components` the crystal-scatter
+   and collimator-scatter parts are also written separately (`Scatter_Crystal_SysMat_shift_*.sysmat`,
+   `Scatter_Collimator_SysMat_shift_*.sysmat`). The PE file name written by PEGen ends in `_v3.sysmat`,
+   so pass it with `-PE`.
+
+   The default scatter model (`-model v2`) integrates the single Compton scatter over the volume where
+   it happens: over the whole scatter crystal (weighted by the transmission of the incoming beam through
+   the collimator and the crystals to every point) for inter-crystal scatter, and over a thin shell around every collimator hole plus the rest of the plate
+   for collimator scatter, with exact solid angles of the crystal faces, Klein–Nishina angles and
+   energies, and attenuation of the scattered photon in the crystals and the collimator. Against the
+   first-order Monte Carlo of `MCGen_MultiGPU` (`physics = single_scatter`, same physics definition) it
+   agrees within 3 % for crystal scatter and 5 % for collimator scatter at 140.5 keV (1 % for both at
+   511 keV), photopeak and wide energy windows, see
+   [`examples/analytic_vs_mc`](examples/analytic_vs_mc/ReadMe.md). `-model legacy` runs the previous
+   kernels (one scatter point per crystal or hole), which were off by factors of 0.002–24 in that example.
 
 ### (Optional) Calculate Inter-Crystal Primary Compton System Matrix
 
@@ -114,6 +133,52 @@ This project provides a GPU-based framework for calculating system matrices esse
      -GeoCrystal <path_to_CrystalGeometryRelationship> \
      -cuda <cuda_device_id>
    ```
+
+### Monte Carlo System Matrix on Multiple GPUs (140.5 keV / 511 keV)
+
+`MCGen_MultiGPU` reads the same four parameter files and writes system matrices with the same
+`float32 [rotation][detector][voxel]` layout as the analytic modules. Voxel chunks are distributed
+dynamically over all GPUs; every photon history has its own Philox random stream, so results do not
+depend on the number of GPUs (and rotation ranges can be split across machines). In
+`physics = primary_pe` mode it reproduces the analytic photoelectric matrix element by element
+(z-score rms ≈ 1 at 140.5 keV and 511 keV); in full mode it adds septal scatter, multiple Compton
+scattering, Rayleigh scattering, K x-rays and inter-crystal scatter, and can output the
+primary / collimator-scatter / inter-crystal-scatter components and per-element statistical errors.
+
+```bash
+cd MCGen_MultiGPU
+./bd                                   # or: make   (make cpu builds a CPU-only binary)
+cd /path/to/params
+/path/to/MCGen_MultiGPU/MCGen_MultiGPU /path/to/MCGen_MultiGPU/MC_Config_Tc99m.txt -gpus 0,1,2,3
+/path/to/MCGen_MultiGPU/MCGen_MultiGPU /path/to/MCGen_MultiGPU/MC_Config_511keV.txt -histories_per_voxel 1e6
+```
+
+See [MCGen_MultiGPU/ReadMe.md](MCGen_MultiGPU/ReadMe.md) for physics, variance reduction, all
+configuration keys, the material database (W, Pb, W alloys, Au, Pt, NaI, CsI, LYSO, BGO, GAGG, CZT,
+LaBr3, …) and the validation results. `tools/make_demo_params.py` writes a small demo geometry and
+`tools/compare_sysmat.py` compares two system matrices (e.g. analytic vs Monte Carlo).
+
+### Analytic vs Monte Carlo example
+
+[`examples/analytic_vs_mc`](examples/analytic_vs_mc/ReadMe.md) runs PEGen + ScatterGen and
+MCGen_MultiGPU on one GPU for a small multi-pinhole system at 140.5 keV and 511 keV and compares the
+photoelectric, crystal-scatter and collimator-scatter components (`./run_example.sh tc99m gpu`).
+Without a GPU, `./run_example.sh tc99m cpu` runs the original analytic CUDA kernels compiled for the
+CPU ([`tools/analytic_cpu`](tools/analytic_cpu/build.py)) and the CPU build of the Monte Carlo code.
+
+### Element Visualizer
+
+Open `Visualizer/index.html` directly, or serve a run directory (recommended for large matrices on a
+remote GPU server, via SSH port forwarding):
+
+```bash
+python3 Visualizer/serve.py --data /path/to/run_dir     # then open http://127.0.0.1:8765
+```
+
+It shows the collimator plates, holes, crystals (coloured by attenuation, energy resolution, flag,
+system-matrix projection, …) and the FOV in 3D with picking and section planes, an x–z layout map,
+system-matrix rows / columns / sensitivity maps streamed from disk, Monte Carlo energy spectra and
+photon tracks, and a list of geometry consistency checks. See [Visualizer/ReadMe.md](Visualizer/ReadMe.md).
 
 ## Parameter Files
 

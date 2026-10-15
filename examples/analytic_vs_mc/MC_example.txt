@@ -1,0 +1,42 @@
+# MCGen_MultiGPU configuration for the analytic-vs-MC example (run_example.sh).
+# run_example.sh overrides materials / physics / histories on the command line for each run.
+
+params_dir          = .
+material_db         =
+preset              = none            # energy from Param_Physics[7]
+
+collimator_material = W
+hole_material       = Air
+crystal_material    = NaI
+
+# window 0 = Param_Physics window (the one the analytic kernels use), window 1 = wide check window
+# (run_example.sh sets the wide window per case: 60-200 keV at 140.5 keV, 250-650 keV at 511 keV)
+windows             = params, 60-200
+ewin_mode           = gauss
+eres_exponent       = 0.5
+
+physics             = full
+rayleigh            = 1
+fluorescence        = 1
+energy_cutoff_keV   = 10
+# The analytic model assumes every photon reaches the crystals through the collimator plate
+# (entrance window).  "absorber" makes the MC follow the same assumption: anything that would
+# pass beside the plate is absorbed.  Describe the real shielding here for production runs.
+shield_outside_collimator = absorber
+
+histories_per_voxel = 4000000
+# center: point source at the voxel centre, as in the analytic kernels (uniform for production:
+# with 2 mm voxels it changes this matrix by < 1 % in total sensitivity, -5..+3 % per voxel and
+# ~9 % in shape (TVD), because the pinhole images of a 2 mm voxel are blurred)
+source_sampling     = center
+direction_sampling  = rect
+detector_bias       = auto
+hole_bias           = auto
+seed                = 20241221
+backend             = gpu
+gpus                = 0
+
+output_dir          = .
+save_components     = 1
+save_relerr         = 1
+trace_voxel         = -1
