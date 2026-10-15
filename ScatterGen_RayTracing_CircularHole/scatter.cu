@@ -1259,6 +1259,8 @@ __global__ void crystalScatterSysMatCuda(float* dst,
 						float comptonConeAngle = calculateConeAngle(xImage, yImage, zImage, x_scatter, y_scatter, z_scatter, xDetector, yDetector, zDetector);
 						float scatterEnergy = calculateScatterEnergy(comptonConeAngle, target_PE_Energy);
 						float energy_resolution_detector_scatterphoton = energy_resolution_detector_targetPE * sqrt(target_PE_Energy / scatterEnergy); // FWHM/E ~ E^-1/2: worse at lower energy
+						// Relative FWHM scales as R(E) = R0 * sqrt(E0 / E): absolute FWHM grows as sqrt(E), so lower-energy scattered photons have worse relative resolution
+						float energy_resolution_detector_scatterphoton = energy_resolution_detector_targetPE * sqrt(target_PE_Energy / scatterEnergy);
 
 						//  The probability that a Compton scatterred photon being detected within the energy window of detector unit
 
@@ -1755,6 +1757,8 @@ __global__ void collimatorScatterSysMatCuda(float* dst,
 						float comptonConeAngle = calculateConeAngle(xImage, yImage, zImage, x_scatter, y_scatter, z_scatter, xDetector, yDetector, zDetector);
 						float scatterEnergy = calculateScatterEnergy(comptonConeAngle, target_PE_Energy);
 						float energy_resolution_detector_scatterphoton = energy_resolution_detector_targetPE * sqrt(target_PE_Energy / scatterEnergy); // FWHM/E ~ E^-1/2: worse at lower energy
+						// Relative FWHM scales as R(E) = R0 * sqrt(E0 / E): absolute FWHM grows as sqrt(E), so lower-energy scattered photons have worse relative resolution
+						float energy_resolution_detector_scatterphoton = energy_resolution_detector_targetPE * sqrt(target_PE_Energy / scatterEnergy);
 
 						//  The probability that a Compton scatterred photon being detected within the energy window of detector unit
 

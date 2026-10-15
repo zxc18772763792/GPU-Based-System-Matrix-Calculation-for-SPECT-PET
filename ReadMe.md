@@ -224,7 +224,9 @@ Defines the detector configuration.
   - `[id * 12 + 7]:` Total Attenuation Coefficient (excluding Rayleigh scatter).
   - `[id * 12 + 8]:` Photon-Electric (PE) Attenuation Coefficient.
   - `[id * 12 + 9]:` Compton Attenuation Coefficient.
-  - `[id * 12 + 10]:` Energy Resolution at Target PE Energy.
+  - `[id * 12 + 10]:` Energy Resolution at Target PE Energy — relative FWHM (FWHM/E, e.g. `0.10` for 10%) at `targetPEEnergy` (E0). Used by the Compton scatter modules:
+    - A scattered photon of energy E is smeared by a Gaussian with relative FWHM R(E) = R0 · √(E0 / E), i.e. σ = R(E) · E / 2.35482. The absolute FWHM grows as √E, so the relative resolution gets worse at lower energy.
+    - With `flagUsingSameEnergyWindow = 0`, this detector's energy window is (1 − R0/2) · E0 to (1 + R0/2) · E0.
   - `[id * 12 + 11]:` Rotation Angle of Detector (Y-axis) [0, 2π).
   - `[id * 12 + 12]:` Flag.
 
