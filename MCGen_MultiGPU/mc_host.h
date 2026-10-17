@@ -20,6 +20,7 @@ public:
     std::string str(const std::string& key, const std::string& def = "") const;
     double num(const std::string& key, double def) const;
     long long integer(const std::string& key, long long def) const;
+    bool flag(const std::string& key, bool def) const;     // 1/0, on/off, true/false, yes/no
     std::vector<std::string> keysWithPrefix(const std::string& prefix) const;
     const std::map<std::string, std::string>& all() const { return kv_; }
     void markUsed(const std::string& key) const;
@@ -75,7 +76,8 @@ struct HostGeometry {
 };
 
 struct ParamFiles {
-    std::vector<float> col, det, img, phy;
+    std::vector<float> col, det, img, phy;    // zero-padded to the sizes the analytic modules read
+    size_t nCol = 0, nDet = 0, nImg = 0, nPhy = 0;   // floats actually in the files
     std::string dir;
 };
 
@@ -115,7 +117,7 @@ struct Simulation {
     std::string tallyName(int t) const;       // e.g. "win0_primary"
 };
 
-bool readParamFile(const std::string& path, std::vector<float>& out, size_t minCount, std::string& err);
+bool readParamFile(const std::string& path, std::vector<float>& out, size_t minCount, std::string& err, size_t* nRead = nullptr);
 std::string jsonEscape(const std::string& s);
 
 }  // namespace mc

@@ -165,7 +165,8 @@ bool GpuRunner::init(const Simulation& S, std::string& err) {
     size_t specBytes = (size_t)2 * kNumClasses * S.C.nSpecBins;
     size_t minFree = (size_t)-1;
     for (int id : ids) {
-        DeviceCtx c;
+        impl_->ctx.emplace_back();             // owned by impl_ from the start: freed on any failure below
+        DeviceCtx& c = impl_->ctx.back();
         c.dev = id;
         MC_CUDA(cudaSetDevice(id));
         cudaDeviceProp prop;
@@ -202,7 +203,6 @@ bool GpuRunner::init(const Simulation& S, std::string& err) {
         size_t fr = 0, tot = 0;
         MC_CUDA(cudaMemGetInfo(&fr, &tot));
         minFree = std::min(minFree, fr);
-        impl_->ctx.push_back(c);
     }
 
     // chunk size: memory budget and load balance
