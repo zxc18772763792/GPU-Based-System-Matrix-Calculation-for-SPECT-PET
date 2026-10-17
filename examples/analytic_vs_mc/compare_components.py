@@ -9,14 +9,17 @@ Expected files in <run_dir>:
     Scatter_Crystal_SysMat_shift_*.sysmat           analytic crystal scatter   (ScatterGen -components)
     Scatter_Collimator_SysMat_shift_*.sysmat        analytic collimator scatter
     mc_pe_win0.sysmat                               MC, physics=primary_pe, ideal window
-    <run>_win<k>_{total,primary,colscatter,xtalscatter,relerr}.sysmat   MC full-physics runs
+    <run>_win<k>_{total,primary,colscatter,xtalscatter}.sysmat          MC runs with components
+    <run>_win<k>_relerr.sysmat, <run>_win<k>_<class>_relerr.sysmat      their relative errors
 optional --wide <dir>: analytic scatter computed with the wide window (MC window 1).
 
 Metrics for every pair analytic A / Monte Carlo M (same window, same event class):
     sum ratio      sum(A) / sum(M)                (+- MC statistical error of sum(M))
     voxel ratio    median and 5-95 % range of the per-voxel sensitivity ratio
     shape TVD      0.5 * sum |A/sum(A) - M/sum(M)|: 0 = same distribution, 1 = disjoint
-                   (the "noise" column bounds what MC statistics alone would give)
+                   (the "noise" column is what MC statistics alone would give, approximately;
+                   it needs the per-component relative errors written by MCGen with
+                   save_components = save_relerr = 1)
 
     python3 compare_components.py <run_dir> [--wide <dir>] [--md report.md] [--svg flood.svg]
 """
@@ -32,9 +35,17 @@ import numpy as np
 CLASSES = ("primary", "colscatter", "xtalscatter")
 
 
+def param_file(d, name):
+    for pre in ("Params_", "Param_"):
+        p = os.path.join(d, pre + name + ".dat")
+        if os.path.exists(p):
+            return p
+    sys.exit(f"{d}: Params_{name}.dat not found")
+
+
 def params(d):
-    det = np.fromfile(os.path.join(d, "Params_Detector.dat"), np.float32)
-    img = np.fromfile(os.path.join(d, "Params_Image.dat"), np.float32)
+    det = np.fromfile(param_file(d, "Detector"), np.float32)
+    img = np.fromfile(param_file(d, "Image"), np.float32)
     nP = int(det[0] + 1e-4)
     nI = int(img[0] + 1e-3) * int(img[1] + 1e-3) * int(img[2] + 1e-3)
     nR = max(1, int(img[6] + 1e-3))
@@ -50,18 +61,19 @@ def load(path, shape):
 
 
 def find(d, pattern):
-    hits = sorted(glob.glob(os.path.join(d, pattern)))
+    hits = sorted(glob.glob(os.path.join(glob.escape(d), pattern)))
     return hits[0] if hits else None
 
 
 def compare(A, M, Merr=None):
-    """A, M: (rot, det, vox) arrays. Merr: absolute 1-sigma error per element (upper bound) or None."""
+    """A, M: (rot, det, vox) arrays. Merr: absolute 1-sigma error of each element of M, or None."""
     sA, sM = A.sum(), M.sum()
     r = {"analytic": sA, "mc": sM, "ratio": sA / sM if sM > 0 else float("nan")}
     if Merr is not None and sM > 0:
         # elements are nearly independent (different histories dominate different crystals)
         r["ratio_err"] = r["ratio"] * math.sqrt((Merr ** 2).sum()) / sM
-        r["tvd_noise"] = 0.5 * math.sqrt(2 / math.pi) * Merr.sum() / sM
+        # expected TVD from noise alone (E|x| = sqrt(2/pi) sigma per element), at most 1
+        r["tvd_noise"] = min(1.0, 0.5 * math.sqrt(2 / math.pi) * Merr.sum() / sM)
     vA, vM = A.sum(axis=1).ravel(), M.sum(axis=1).ravel()
     ok = vM > 0.05 * vM.max() if vM.max() > 0 else np.zeros_like(vM, bool)
     if ok.any():
@@ -70,6 +82,16 @@ def compare(A, M, Merr=None):
     if sA > 0 and sM > 0:
         r["tvd"] = 0.5 * np.abs(A / sA - M / sM).sum()
     return r
+
+
+def finite(x):
+    if isinstance(x, dict):
+        return {k: finite(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [finite(v) for v in x]
+    if isinstance(x, (float, np.floating)):
+        return float(x) if math.isfinite(x) else None
+    return x
 
 
 def fmt(x, nd=3):
@@ -81,7 +103,7 @@ def row(name, r):
     vr = r.get("voxel_ratio")
     vr = f"{vr[1]:.3f} [{vr[0]:.3f}, {vr[2]:.3f}]" if vr else "-"
     tvd = f"{r['tvd']:.3f}" if "tvd" in r else "-"
-    noise = f"≤ {r['tvd_noise']:.3f}" if "tvd_noise" in r else "-"
+    noise = f"≈ {r['tvd_noise']:.3f}" if "tvd_noise" in r else "-"
     return f"| {name} | {fmt(r['analytic'])} | {fmt(r['mc'])} | {ratio} | {vr} | {tvd} | {noise} |"
 
 
@@ -182,16 +204,20 @@ def main():
             if an is None or not os.path.exists(f("total")):
                 continue
             M = {c: load(f(c), shp) for c in CLASSES + ("total",)}
-            err = load(f("relerr"), shp) * M["total"] if os.path.exists(f("relerr")) else None
+            # each component's own error; without it (older MCGen output) no error is shown, since the
+            # total's error mostly measures the primary and overstates the scatter components' noise
+            err = {c: load(f(c + "_relerr"), shp) * M[c] if os.path.exists(f(c + "_relerr")) else None
+                   for c in CLASSES}
+            err["total"] = load(f("relerr"), shp) * M["total"] if os.path.exists(f("relerr")) else None
             pe_term = AN["pe"]
             rr = {
-                "primary": compare(pe_term, M["primary"], err),
-                "crystal": compare(an["crystal"], M["xtalscatter"], err),
-                "collimator": compare(an["collimator"], M["colscatter"], err),
-                "total": compare(pe_term + an["crystal"] + an["collimator"], M["total"], err),
+                "primary": compare(pe_term, M["primary"], err["primary"]),
+                "crystal": compare(an["crystal"], M["xtalscatter"], err["xtalscatter"]),
+                "collimator": compare(an["collimator"], M["colscatter"], err["colscatter"]),
+                "total": compare(pe_term + an["crystal"] + an["collimator"], M["total"], err["total"]),
             }
-            sa = (an["crystal"].sum() + an["collimator"].sum()) / pe_term.sum()
-            sm = (M["xtalscatter"].sum() + M["colscatter"].sum()) / M["primary"].sum()
+            sa = (an["crystal"].sum() + an["collimator"].sum()) / pe_term.sum() if pe_term.sum() > 0 else float("nan")
+            sm = (M["xtalscatter"].sum() + M["colscatter"].sum()) / M["primary"].sum() if M["primary"].sum() > 0 else float("nan")
             rr["scatter_to_primary"] = {"analytic": sa, "mc": sm}
             res[f"{run}_win{k}"] = rr
             md += [f"### {run}, {label}\n", f"{desc}\n", HEAD,
@@ -215,7 +241,7 @@ def main():
             fh.write(text + "\n")
     if a.json:
         with open(a.json, "w") as fh:
-            json.dump(res, fh, indent=1)
+            json.dump(finite(res), fh, indent=1)       # strict JSON: NaN / inf -> null
 
 
 if __name__ == "__main__":
