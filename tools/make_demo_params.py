@@ -17,6 +17,7 @@ import argparse
 import math
 import os
 import struct
+import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DB = os.path.join(HERE, "..", "MCGen_MultiGPU", "data", "materials.db")
@@ -92,6 +93,8 @@ def main():
     grid, mats = load_db(args.db)
     os.makedirs(args.out, exist_ok=True)
     E = args.energy
+    if args.rotations < 1:
+        sys.exit("--rotations must be >= 1")
     ct, cpe, cc = coeffs(grid, mats, args.collimator, E)
     dt, dpe, dc = coeffs(grid, mats, args.crystal, E)
 
@@ -105,23 +108,26 @@ def main():
                 holes.append(((i - (n - 1) / 2) * args.pitch, (k - (n - 1) / 2) * args.pitch))
     else:  # parallel hole, hexagonal packing over the plate
         p = args.pitch
-        r = args.hole_radius
-        row = 0
-        z = -H / 2 + p / 2
-        while z <= H / 2 - p / 2 + 1e-6:
-            x0 = -W / 2 + p / 2 + (p / 2 if row % 2 else 0)
-            x = x0
+        dz = p * math.sqrt(3) / 2
+        nrow = int((H - p) / dz + 1e-6) + 1 if H >= p else 0
+        z0 = -(nrow - 1) * dz / 2                     # rows centred on the plate
+        for row in range(nrow):
+            z = z0 + row * dz
+            x = -W / 2 + p / 2 + (p / 2 if row % 2 else 0)
             while x <= W / 2 - p / 2 + 1e-6:
                 holes.append((x, z))
                 x += p
-            z += p * math.sqrt(3) / 2
-            row += 1
+    # the analytic programs read exactly 80000 floats per parameter file (8877 holes, 6666 crystals)
+    if len(holes) > 8877:
+        sys.exit(f"{len(holes)} holes: the analytic programs support at most 8877 (Params_Collimator.dat = 80000 floats)")
+    if args.crystals ** 2 > 6666:
+        sys.exit(f"{args.crystals ** 2} crystals: the analytic programs support at most 6666 (Params_Detector.dat = 80000 floats)")
     col = [0.0] * (100 + 9 * len(holes))
     col[0] = 1
     col[10:18] = [len(holes), W, T, H, 0.0, ct, cpe, cc]
     for h, (x, z) in enumerate(holes):
         col[100 + 9 * h: 109 + 9 * h] = [x, -T / 2, T / 2, z, args.hole_radius, 0.0, 0.0, 0.0, 1.0]
-    write(os.path.join(args.out, "Params_Collimator.dat"), col, max(80000, len(col)))
+    write(os.path.join(args.out, "Params_Collimator.dat"), col, 80000)
 
     # ---------------------------------------------------------------- detector
     n = args.crystals
@@ -132,7 +138,7 @@ def main():
                     (iz - (n - 1) / 2) * args.crystal_pitch,
                     args.crystal_size, args.thickness, args.crystal_size,
                     dt, dpe, dc, args.eres, 0.0, 1.0]
-    write(os.path.join(args.out, "Params_Detector.dat"), det, max(80000, len(det)))
+    write(os.path.join(args.out, "Params_Detector.dat"), det, 80000)
 
     # ---------------------------------------------------------------- image / physics
     nx, ny, nz = args.fov
