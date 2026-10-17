@@ -119,6 +119,8 @@
     smBad: ['文件大小与几何不符 ({0})', 'File size does not match the geometry ({0})'],
     vRow: ['探测器 {0} 响应 (旋转 {1})', 'Response of detector {0} (rotation {1})'],
     vSens: ['灵敏度 Σ探测器 (旋转 {0})', 'Sensitivity Σ detectors (rotation {0})'],
+    smRot: ['矩阵文件包含旋转 {0}–{1}（参数文件共 {2} 个旋转）', 'The matrix file holds rotations {0}–{1} (the parameter files have {2})'],
+    stRotOut: ['当前矩阵文件不包含旋转 {0}（只有 {1}–{2}）', 'The matrix file has no rotation {0} (only {1}–{2})'],
     // checks
     chkLayers: ['准直层数 {0} 不在 0–10 范围内', 'Number of collimator layers {0} is outside 0–10'],
     chkHoleFile: ['Params_Collimator 声明 {0} 个孔，但文件只有 {1} 个数', 'Params_Collimator declares {0} holes but only has {1} values'],

@@ -29,8 +29,12 @@ DATA_EXT = (".dat", ".sysmat", ".csv", ".json", ".bin", ".raw", ".img", ".txt")
 MAX_STRIDED = 1 << 22  # values per /api/strided request
 
 
+LOCAL_NAMES = {"127.0.0.1", "localhost", "::1"}
+
+
 class Handler(http.server.SimpleHTTPRequestHandler):
     data_dir = "."
+    allowed_hosts = LOCAL_NAMES   # Host header names accepted (None: any); blocks DNS rebinding of a local server
 
     def __init__(self, *a, **kw):
         super().__init__(*a, directory=UI_DIR, **kw)
@@ -44,8 +48,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         super().end_headers()
 
     # ------------------------------------------------------------ helpers
+    def _host_ok(self):
+        if self.allowed_hosts is None:
+            return True
+        host = (self.headers.get("Host") or "").strip().lower()
+        if host.startswith("["):                      # [::1]:port
+            host = host[1:host.find("]")] if "]" in host else host
+        else:
+            host = host.rsplit(":", 1)[0]
+        return host in self.allowed_hosts
+
     def _data_path(self, rel):
-        rel = urllib.parse.unquote(rel)
+        """rel: path relative to the data directory, already URL-decoded"""
         root = os.path.realpath(self.data_dir)
         p = os.path.realpath(os.path.join(root, rel))
         if os.path.commonpath([root, p]) != root or not os.path.isfile(p):
@@ -65,19 +79,23 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     # ------------------------------------------------------------ routes
     def do_GET(self):
+        if not self._host_ok():
+            return self._error(403, "unexpected Host header")
         url = urllib.parse.urlparse(self.path)
         if url.path == "/api/files":
             return self._files()
         if url.path == "/api/strided":
             return self._strided(urllib.parse.parse_qs(url.query))
         if url.path.startswith("/data/"):
-            return self._data(url.path[len("/data/"):], head=False)
+            return self._data(urllib.parse.unquote(url.path[len("/data/"):]), head=False)
         return super().do_GET()
 
     def do_HEAD(self):
+        if not self._host_ok():
+            return self._error(403, "unexpected Host header")
         url = urllib.parse.urlparse(self.path)
         if url.path.startswith("/data/"):
-            return self._data(url.path[len("/data/"):], head=True)
+            return self._data(urllib.parse.unquote(url.path[len("/data/"):]), head=True)
         return super().do_HEAD()
 
     def _files(self):
@@ -89,7 +107,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             for fn in sorted(filenames):
                 if fn.lower().endswith(DATA_EXT):
                     p = os.path.join(dirpath, fn)
-                    out.append({"path": os.path.relpath(p, root).replace(os.sep, "/"), "size": os.path.getsize(p)})
+                    real = os.path.realpath(p)
+                    if os.path.commonpath([root, real]) != root:   # symlink leaving the data directory
+                        continue
+                    try:
+                        size = os.path.getsize(real)
+                    except OSError:                                # dangling link, file removed meanwhile
+                        continue
+                    out.append({"path": os.path.relpath(p, root).replace(os.sep, "/"), "size": size})
         self._json({"root": root, "files": out})
 
     def _data(self, rel, head):
@@ -100,22 +125,25 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         rng = self.headers.get("Range")
         start, end = 0, size - 1
         partial = False
-        if rng:
-            m = re.match(r"bytes=(\d*)-(\d*)$", rng.strip())
-            if not m:
-                return self._error(416, "bad range")
+        # single byte range; anything else (other units, multiple ranges, malformed) is ignored -> 200 (RFC 9110)
+        m = re.match(r"bytes=(\d*)-(\d*)$", rng.strip()) if rng else None
+        if m and (m.group(1) or m.group(2)):
             if m.group(1):
                 start = int(m.group(1))
                 end = int(m.group(2)) if m.group(2) else size - 1
-            else:  # suffix range
+            else:  # suffix range: the last N bytes
                 start = max(0, size - int(m.group(2)))
-            end = min(end, size - 1)
-            if start > end:
-                self.send_response(416)
-                self.send_header("Content-Range", f"bytes */{size}")
-                self.end_headers()
-                return
-            partial = True
+            if end >= start:                              # "bytes=10-5" is invalid and ignored
+                if start >= size:
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{size}")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                end = min(end, size - 1)
+                partial = True
+            else:
+                start, end = 0, size - 1
         length = end - start + 1
         self.send_response(206 if partial else 200)
         ctype = mimetypes.guess_type(p)[0] or "application/octet-stream"
@@ -178,6 +206,8 @@ def main():
     if not os.path.isdir(args.data):
         sys.exit(f"not a directory: {args.data}")
     Handler.data_dir = os.path.abspath(args.data)
+    # requests must name this server (blocks DNS rebinding); on a non-local interface any name is accepted
+    Handler.allowed_hosts = LOCAL_NAMES if args.host in LOCAL_NAMES else None
     srv = Server((args.host, args.port), Handler)
     url = f"http://{'127.0.0.1' if args.host in ('0.0.0.0', '') else args.host}:{args.port}/"
     print(f"Serving viewer at {url}  (data: {Handler.data_dir})  - Ctrl+C to stop")
