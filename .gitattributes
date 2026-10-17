@@ -1,0 +1,18 @@
+# The original analytic modules use CRLF line endings. Keep them byte for byte (no end-of-line
+# conversion), so that edits from Windows and Linux do not produce mixed files.
+PEGen_RayTracing_CircularHole/*.cpp -text
+PEGen_RayTracing_CircularHole/*.cu  -text
+PEGen_RayTracing_CircularHole/*.h   -text
+PEGen_RayTracing_CircularHole/*.txt -text
+ScatterGen_*/*.cpp -text
+ScatterGen_*/*.cu  -text
+ScatterGen_*/*.h   -text
+ScatterGen_*/*.txt -text
+
+# shell scripts must keep LF to run
+*.sh text eol=lf
+bd   text eol=lf
+
+*.png    binary
+*.dat    binary
+*.sysmat binary

@@ -6,21 +6,24 @@ A GPU-accelerated system matrix calculation tool designed for SPECT and PET syst
 
 - [Introduction](#introduction)
 - [Features](#features)
+- [Modules](#modules)
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
 - [Usage](#usage)
   - [Calculate Photon-Electric System Matrix](#calculate-photon-electric-system-matrix)
   - [Calculate Primary Compton System Matrix](#calculate-primary-compton-system-matrix)
-  - [(Optional) Calculate Inter-Crystal Primary Compton System Matrix](#optional-calculate-inter-crystal-primary-compton-system-matrix)
+  - [Legacy modules: ScatterGen_Crystal and ScatterGen_Collimator](#legacy-modules-scattergen_crystal-and-scattergen_collimator)
   - [Monte Carlo System Matrix on Multiple GPUs (140.5 keV / 511 keV)](#monte-carlo-system-matrix-on-multiple-gpus-1405-kev--511-kev)
+  - [Analytic vs Monte Carlo example](#analytic-vs-monte-carlo-example)
   - [Element Visualizer](#element-visualizer)
 - [Parameter Files](#parameter-files)
-  - [Param_Collimator.dat](#param_collimatordat)
-  - [Param_Detector.dat](#param_detectordat)
-  - [Param_Image.dat](#param_imagedat)
-  - [Param_Physics.dat](#param_physicsdat)
+  - [Params_Collimator.dat](#params_collimatordat)
+  - [Params_Detector.dat](#params_detectordat)
+  - [Params_Image.dat](#params_imagedat)
+  - [Params_Physics.dat](#params_physicsdat)
 - [Contact](#contact)
 - [Acknowledgements](#acknowledgements)
+- [Usage Terms](#usage-terms)
 - [License](#license)
 
 ## Introduction
@@ -35,6 +38,22 @@ This project provides a GPU-based framework for calculating system matrices esse
 - **Configurable Parameters:** Easily adjustable parameter files to define system configurations.
 - **Multi-GPU Monte Carlo:** `MCGen_MultiGPU` simulates full photon transport (photoelectric + K-fluorescence, Klein–Nishina Compton, Rayleigh, energy-dependent attenuation, energy-resolution windows) for 140.5 keV and 511 keV from the same parameter files, scaling over any number of GPUs.
 - **Element Visualizer:** a zero-dependency browser UI to inspect collimator layers, holes, crystals, the FOV, system-matrix rows/columns/sensitivity maps and Monte Carlo spectra and photon tracks.
+
+## Modules
+
+| Directory | Program | Purpose |
+|---|---|---|
+| `PEGen_RayTracing_CircularHole/` | `PEGen_CircularHole` | photoelectric (primary) system matrix, analytic ray tracing through cylindrical holes |
+| `ScatterGen_RayTracing_CircularHole/` | `ScatterGen_CircularHole` | first-order Compton scatter matrix (crystal + collimator scatter), scatter model v2 (default) or the legacy kernels |
+| `ScatterGen_Crystal/`, `ScatterGen_Collimator/` | `ScatterGen_Crystal`, `ScatterGen_Collimator` | legacy, superseded by `ScatterGen_CircularHole -model legacy` (see below) |
+| `MCGen_MultiGPU/` | `MCGen_MultiGPU`, `MCGen_CPU` | multi-GPU Monte Carlo system matrix (140.5 keV / 511 keV), same parameter files and output layout |
+| `Visualizer/` | `index.html`, `serve.py` | browser viewer of the geometry, system matrices, spectra and tracks |
+| `examples/analytic_vs_mc/` | `run_example.sh` | analytic (PE + scatter) vs Monte Carlo, component by component |
+| `tools/` | Python scripts | demo parameter files, matrix comparison, CPU build of the analytic kernels |
+
+All programs read the same four parameter files (see [Parameter Files](#parameter-files)) from the working
+directory and write `float32` matrices in `[rotation][detector][voxel]` order. The Python helpers need
+`numpy` (`pip install -r requirements.txt`).
 
 ## Prerequisites
 
@@ -53,7 +72,7 @@ This project provides a GPU-based framework for calculating system matrices esse
 
 2. **Prepare Parameter Files:**
 
-   Before compiling, prepare four parameter files (`Param_Collimator.dat`, `Param_Detector.dat`, `Param_Image.dat`, `Param_Physics.dat`) as described in the [Parameter Files](#parameter-files) section.
+   Before running, prepare four parameter files (`Params_Collimator.dat`, `Params_Detector.dat`, `Params_Image.dat`, `Params_Physics.dat`) as described in the [Parameter Files](#parameter-files) section, or write a small demo set with `python3 tools/make_demo_params.py --out demo`.
 
 ## Usage
 
@@ -61,20 +80,22 @@ This project provides a GPU-based framework for calculating system matrices esse
 
 1. **Compile the Photon-Electric Module:**
 
-   Navigate to the `PE_Gen_RayTracing_CircularHole` directory and compile the code.
+   Navigate to the `PEGen_RayTracing_CircularHole` directory and compile the code (`bd` uses
+   `/usr/local/cuda-12.6`; set `CUDA_HOME` for another installation).
 
    ```bash
-   cd PE_Gen_RayTracing_CircularHole
+   cd PEGen_RayTracing_CircularHole
    ./bd
    ```
 
-2. **Run the Photon-Electric System Matrix Generator:**
+2. **Run the Photon-Electric System Matrix Generator** in the directory with the parameter files:
 
    ```bash
-   ./PESysMatGen -cuda 0
+   /path/to/PEGen_RayTracing_CircularHole/PEGen_CircularHole -cuda 0
    ```
 
-   Replace `0` with the appropriate CUDA device ID if necessary.
+   Replace `0` with the appropriate CUDA device ID if necessary. The output is
+   `PE_SysMat_shift_<x>_<y>_<z>_v3.sysmat`.
 
 ### Calculate Primary Compton System Matrix
 
@@ -98,10 +119,12 @@ This project provides a GPU-based framework for calculating system matrices esse
      [-components] [-model v2|legacy]
    ```
 
-   Replace placeholders with the actual paths and CUDA device ID. With `-components` the crystal-scatter
-   and collimator-scatter parts are also written separately (`Scatter_Crystal_SysMat_shift_*.sysmat`,
-   `Scatter_Collimator_SysMat_shift_*.sysmat`). The PE file name written by PEGen ends in `_v3.sysmat`,
-   so pass it with `-PE`.
+   All arguments are optional. Without `-PE` the PE matrix written by PEGen in the same directory
+   (`PE_SysMat_shift_*_v3.sysmat`) is used. The geometry bitmaps are computed when
+   `Params_Physics[8]` / `[9]` are 1 (and written to `GeometryRelationShip_*`); `-GeoCrystal` /
+   `-GeoCollimator` read them from a file instead. The output is `Scatter_SysMat_shift_*.sysmat`; with
+   `-components` the crystal-scatter and collimator-scatter parts are also written separately
+   (`Scatter_Crystal_SysMat_shift_*.sysmat`, `Scatter_Collimator_SysMat_shift_*.sysmat`).
 
    The default scatter model (`-model v2`) integrates the single Compton scatter over the volume where
    it happens: over the whole scatter crystal (weighted by the transmission of the incoming beam through
@@ -112,27 +135,22 @@ This project provides a GPU-based framework for calculating system matrices esse
    agrees within 3 % for crystal scatter and 5 % for collimator scatter at 140.5 keV (1 % for both at
    511 keV), photopeak and wide energy windows, see
    [`examples/analytic_vs_mc`](examples/analytic_vs_mc/ReadMe.md). `-model legacy` runs the previous
-   kernels (one scatter point per crystal or hole), which were off by factors of 0.002–24 in that example.
+   kernels (one scatter point per crystal or hole), which were off by factors of 0–24 in that example.
 
-### (Optional) Calculate Inter-Crystal Primary Compton System Matrix
+### Legacy modules: ScatterGen_Crystal and ScatterGen_Collimator
 
-1. **Compile the Inter-Crystal Compton Module:**
+These two directories hold older stand-alone copies of the legacy kernels (inter-crystal scatter only,
+collimator scatter only). They are kept for reference; `ScatterGen_CircularHole` computes both parts,
+with the v2 model by default and the same legacy kernels with `-model legacy`. To keep them from
+overwriting its output they write `Scatter_Crystal_legacy_SysMat_shift_*.sysmat` /
+`Scatter_Collimator_legacy_SysMat_shift_*.sysmat`.
 
-   Navigate to the `ScatterGen_Crystal` directory and compile the code.
-
-   ```bash
-   cd ../ScatterGen_Crystal
-   ./bd
-   ```
-
-2. **Run the Inter-Crystal Compton System Matrix Generator:**
-
-   ```bash
-   ./ScatterGen_Crystal \
-     -PE <path_to_PE_SystemMatrix> \
-     -GeoCrystal <path_to_CrystalGeometryRelationship> \
-     -cuda <cuda_device_id>
-   ```
+```bash
+cd ScatterGen_Crystal && ./bd
+./ScatterGen_Crystal [-PE <PE_SystemMatrix>] [-GeoCrystal <CrystalGeometryRelationship>] [-cuda <id>]
+cd ../ScatterGen_Collimator && ./bd
+./ScatterGen_Collimator [-PE <PE_SystemMatrix>] [-GeoCollimator <CollimatorGeometryRelationship>] [-cuda <id>]
+```
 
 ### Monte Carlo System Matrix on Multiple GPUs (140.5 keV / 511 keV)
 
@@ -182,26 +200,31 @@ photon tracks, and a list of geometry consistency checks. See [Visualizer/ReadMe
 
 ## Parameter Files
 
-Four parameter files are required to define your system. Each file is a pure `float32` array organized as follows:
+Four parameter files are required to define your system. Each file is a pure little-endian `float32`
+array organized as follows. The analytic programs read 80000 floats of `Params_Collimator.dat` and
+`Params_Detector.dat` and 100 of the other two, which allows at most 9 collimator layers, 8877 holes
+and 6666 crystals (larger geometries are rejected; the Monte Carlo code reads the whole files). Coordinates are in mm; y points from the FOV towards the
+collimator, with y = 0 at the centre of collimator layer 0 for the hole and detector positions;
+attenuation coefficients are in 1/mm. The Monte Carlo code also accepts the names `Param_*.dat`.
 
-### `Param_Collimator.dat`
+### `Params_Collimator.dat`
 
 Defines the collimator configuration.
 
 - **Index 0:** `numCollimatorLayers` — Number of collimator layers.
-- **For each Collimator Layer (`id_CollimatorLayer`):**
-  - `[id * 10 + 0]:` Number of Collimator Holes.
-  - `[id * 10 + 1]:` Width of the Collimator Layer (mm).
-  - `[id * 10 + 2]:` Thickness of the Collimator Layer (mm).
-  - `[id * 10 + 3]:` Height of the Collimator Layer (mm).
-  - `[id * 10 + 4]:` Distance between the 1st and current collimator layer (mm).
-  - `[id * 10 + 5]:` Total Attenuation Coefficient.
-  - `[id * 10 + 6]:` Photon-Electric (PE) Attenuation Coefficient.
-  - `[id * 10 + 7]:` Compton Attenuation Coefficient.
-- **For each Hole (`id_Hole`):**
+- **For each Collimator Layer (`id` = 0 … numCollimatorLayers − 1):**
+  - `[(id + 1) * 10 + 0]:` Number of Collimator Holes.
+  - `[(id + 1) * 10 + 1]:` Width of the Collimator Layer (mm).
+  - `[(id + 1) * 10 + 2]:` Thickness of the Collimator Layer (mm).
+  - `[(id + 1) * 10 + 3]:` Height of the Collimator Layer (mm).
+  - `[(id + 1) * 10 + 4]:` Distance between the 1st and current collimator layer (mm).
+  - `[(id + 1) * 10 + 5]:` Total Attenuation Coefficient.
+  - `[(id + 1) * 10 + 6]:` Photon-Electric (PE) Attenuation Coefficient.
+  - `[(id + 1) * 10 + 7]:` Compton Attenuation Coefficient.
+- **For each Hole (`id_Hole`, the holes of all layers one after the other, layer 0 first):**
   - `[id_Hole * 9 + 100]:` X-coordinate of Hole Center.
-  - `[id_Hole * 9 + 101]:` Y1-coordinate of Hole Center.
-  - `[id_Hole * 9 + 102]:` Y2-coordinate of Hole Center.
+  - `[id_Hole * 9 + 101]:` Y1: start of the hole along y (y = 0 at the centre of layer 0, e.g. −T/2 for a hole through layer 0 of thickness T).
+  - `[id_Hole * 9 + 102]:` Y2: end of the hole along y (e.g. +T/2).
   - `[id_Hole * 9 + 103]:` Z-coordinate of Hole Center.
   - `[id_Hole * 9 + 104]:` Radius of Hole.
   - `[id_Hole * 9 + 105]:` Total Attenuation Coefficient of Hole.
@@ -209,7 +232,7 @@ Defines the collimator configuration.
   - `[id_Hole * 9 + 107]:` Compton Attenuation Coefficient of Hole.
   - `[id_Hole * 9 + 108]:` Flag.
 
-### `Param_Detector.dat`
+### `Params_Detector.dat`
 
 Defines the detector configuration.
 
@@ -230,7 +253,7 @@ Defines the detector configuration.
   - `[id * 12 + 11]:` Rotation Angle of Detector (Y-axis) [0, 2π).
   - `[id * 12 + 12]:` Flag.
 
-### `Param_Image.dat`
+### `Params_Image.dat`
 
 Defines the image voxel configuration.
 
@@ -247,20 +270,20 @@ Defines the image voxel configuration.
 - **Index 10:** `shiftFOVZ` (mm) — Shift of the FOV along the Z-axis.
 - **Index 11:** `FOV2Collimator0` (mm) — Distance from FOV to Collimator layer 0.
 
-### `Param_Physics.dat`
+### `Params_Physics.dat`
 
 Defines the physics parameters for the simulation.
 
 - **Index 0:** `flagUsingCompton` — Enable (1) or disable (0) Compton scattering.
-- **Index 1:** `flagSavingPESysmat` — Enable (1) or disable (0) saving PE system matrix.
+- **Index 1:** `flagSavingPESysmat` — not used (PEGen always writes the PE system matrix).
 - **Index 2:** `flagSavingComptonSysmat` — Enable (1) or disable (0) saving Compton system matrix.
 - **Index 3:** `flagSavingPEComptonSysmat` — Enable (1) or disable (0) saving combined PE and Compton system matrix.
 - **Index 4:** `flagUsingSameEnergyWindow` — Use (1) or not (0) the same energy window.
-- **Index 5:** `lowerThresholdEnergyWindow` — Lower threshold of the energy window.
-- **Index 6:** `upperThresholdEnergyWindow` — Upper threshold of the energy window.
-- **Index 7:** `targetPEEnergy` — Target PE energy.
-- **Index 8:** `flagCalculateCrystalGeometryRelationship` — Enable (1) or disable (0) calculation of crystal geometry relationship.
-- **Index 9:** `flagCalculateCollimatorGeometryRelationship` — Enable (1) or disable (0) calculation of collimator geometry relationship.
+- **Index 5:** `lowerThresholdEnergyWindow` — Lower threshold of the energy window (keV).
+- **Index 6:** `upperThresholdEnergyWindow` — Upper threshold of the energy window (keV).
+- **Index 7:** `targetPEEnergy` — Target PE energy (keV).
+- **Index 8:** `flagCalculateCrystalGeometryRelationship` — 1: compute the crystal geometry bitmap (and write it to `GeometryRelationShip_Crystal2Crystal`); 0: read it from that file (or the `-GeoCrystal` file, which also sets 0).
+- **Index 9:** `flagCalculateCollimatorGeometryRelationship` — the same for the collimator bitmap of the legacy kernels (`GeometryRelationShip_Collimator2Crystal`, `-GeoCollimator`).
 
 ## Contact
 

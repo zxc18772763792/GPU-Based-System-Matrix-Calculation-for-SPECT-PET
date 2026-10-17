@@ -1,0 +1,4 @@
+# Python helpers (tools/, examples/, MCGen_MultiGPU/tests, Visualizer/serve.py); the C++/CUDA programs need none of this.
+numpy>=1.20        # compare_sysmat.py, compare_components.py, tests/reference_mc.py
+# optional: xraylib, only to regenerate or extend MCGen_MultiGPU/data/materials.db (tools/gen_material_db.py)
+# xraylib>=4.1
