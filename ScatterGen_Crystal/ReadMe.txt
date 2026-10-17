@@ -1,4 +1,6 @@
-Total 4 parameter files: Param_Collimator:Param_Detector:Param_Image:Param_Physics
+Total 4 parameter files: Params_Collimator.dat, Params_Detector.dat, Params_Image.dat, Params_Physics.dat
+(float32 arrays; the programs read 80000 floats of Params_Collimator/Params_Detector and 100 of the others,
+ so at most 9 collimator layers, 8877 holes and 6666 crystals). Full description: ../ReadMe.md#parameter-files
 Param_Collimator:
 Param_Collimator[0]:numCollimatorLayers
 parameter_Collimator[(id_CollimatorLayer + 1) * 10 + 0]:Number of Collimator Holes in Collimator Layer id_CollimatorLayer
@@ -10,10 +12,10 @@ parameter_Collimator[(id_CollimatorLayer + 1) * 10 + 5]:Total Attneuation coeffi
 parameter_Collimator[(id_CollimatorLayer + 1) * 10 + 6]:PE Attneuation coefficient of collimator layer id_CollimatorLayer
 parameter_Collimator[(id_CollimatorLayer + 1) * 10 + 7]:Compton Attneuation coefficient of collimator layer id_CollimatorLayer
 parameter_Collimator[id_Hole * 9 + 100]:x of hole center
-parameter_Collimator[id_Hole * 9 + 101]:y1 of hole center
-parameter_Collimator[id_Hole * 9 + 102]:y2 of hole center
+parameter_Collimator[id_Hole * 9 + 101]:y1 of hole (start of the hole along y, y = 0 at the centre of collimator layer 0, e.g. -T/2)
+parameter_Collimator[id_Hole * 9 + 102]:y2 of hole (end of the hole along y, same frame, e.g. +T/2)
 parameter_Collimator[id_Hole * 9 + 103]:z of hole center
-parameter_Collimator[id_Hole * 9 + 104]:R of hole center
+parameter_Collimator[id_Hole * 9 + 104]:R of hole (radius)
 parameter_Collimator[id_Hole * 9 + 105]:Total Attneuation coefficient of hole
 parameter_Collimator[id_Hole * 9 + 106]:PE Attneuation coefficient of hole
 parameter_Collimator[id_Hole * 9 + 107]:Compton Attneuation coefficient of hole
@@ -50,12 +52,12 @@ Param_Image[11]:FOV2Collimator0(mm)
 
 Param_Physics:
 Param_Physics[0]:flagUsingCompton
-Param_Physics[1]:flagSavingPESysmat
+Param_Physics[1]:flagSavingPESysmat (not used: PEGen_CircularHole always writes the PE matrix)
 Param_Physics[2]:flagSavingComptonSysmat
 Param_Physics[3]:flagSaving PE+Compton Sysmat
 Param_Physics[4]:flagUsingSameEnegryWindow
 Param_Physics[5]:lowerThresholdofEnegryWindow
 Param_Physics[6]:upperThresholdofEnegryWindow
 Param_Physics[7]:target PE Energy
-Param_Physics[8]:flagCalCulateCrystalGeometryRelationShip
-Param_Physics[9]:flagCalCulateCollimatorGeometryRelationShip
+Param_Physics[8]:flagCalCulateCrystalGeometryRelationShip (1: compute and write it, 0: read it; -GeoCrystal <file> sets 0)
+Param_Physics[9]:flagCalCulateCollimatorGeometryRelationShip (1: compute and write it, 0: read it; -GeoCollimator <file> sets 0)

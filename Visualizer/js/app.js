@@ -43,13 +43,19 @@
     let n = 0, geom = false;
     for (const src of list) {
       const kind = SV.classify(src.name);
-      if (!kind) continue;
+      if (!kind || kind === 'relerr') continue;
+      // in a folder, parameter files only from its top level (sub-folders such as wide/ hold other runs)
+      const depth = src.path.split('/').length - (src.file && src.file.webkitRelativePath ? 1 : 0);
+      if (['col', 'det', 'img', 'phy'].includes(kind) && depth > 1) continue;
       try {
         if (['col', 'det', 'img', 'phy'].includes(kind)) {
           App.f32[kind] = new Float32Array(await src.read(0, src.size - (src.size % 4)));
           geom = true;
         } else if (kind === 'sysmat') {
-          if (!App.sysmats.some((s) => s.src.path === src.path && s.src.size === src.size)) App.sysmats.push({ src, sm: null });
+          if (!App.sysmats.some((s) => s.src.path === src.path && s.src.size === src.size)) {
+            const m = /_rot(\d+)-(\d+)_/.exec(src.name);          // MCGen rot_begin/rot_end part: rotations B .. E-1
+            App.sysmats.push({ src, sm: null, rot0: m ? parseInt(m[1], 10) : 0 });
+          }
         } else if (kind === 'spectrum') App.spectrum = SV.parseSpectrum(await src.text());
         else if (kind === 'tracks') App.tracks = JSON.parse(await src.text());
         else if (kind === 'summary') App.summary = JSON.parse(await src.text());
@@ -57,7 +63,7 @@
       } catch (e) { fail(e); }
     }
     if (geom && (App.f32.col || App.f32.det)) buildModel();
-    if (App.cur < 0 && App.sysmats.length) App.cur = App.sysmats.length - 1;
+    if (App.cur < 0 && App.sysmats.length) App.cur = preferredSysmat();
     refreshSysmat();
     buildTracks();
     refreshMC();
@@ -65,6 +71,16 @@
     App.plot.redraw();
     if (n) status(t('stLoaded', n));
     return n;
+  }
+
+  // default matrix: window 0 total of an MC run, else an analytic PE / sum matrix, else the first one
+  function preferredSysmat() {
+    const names = App.sysmats.map((s) => s.src.name.toLowerCase());
+    for (const re of [/_win0_total\.sysmat$/, /_win0\.sysmat$/, /^pe_sysmat/, /^scatter_sysmat/, /sysmat/]) {
+      const i = names.findIndex((n) => re.test(n));
+      if (i >= 0) return i;
+    }
+    return 0;
   }
 
   function demo() {
@@ -357,7 +373,7 @@
   }
 
   // ================================================================ info panel
-  const row = (k, v) => `<tr><td>${SV.esc(k)}</td><td>${v}</td></tr>`;
+  const row = (k, v) => `<tr><td>${SV.esc(k)}</td><td>${SV.esc(v)}</td></tr>`;
   const v3 = (a) => a.map((x) => SV.fmt(x, 5)).join(', ');
   App.describeShort = function (sel) {
     const m = App.model;
@@ -435,6 +451,8 @@
     const items = SV.checkModel(App.model);
     const sm = curSysmat(true);
     if (sm && !sm.ok) items.unshift({ level: 'error', key: 'smBad', args: [SV.bytes(sm.src.size)] });
+    else if (sm && (sm.rot0 > 0 || sm.nRot !== App.model.image.nRot))
+      items.unshift({ level: 'warn', key: 'smRot', args: [sm.rot0, sm.rot0 + sm.nRot - 1, App.model.image.nRot] });
     for (const it of items) {
       const li = document.createElement('li');
       li.className = it.level;
@@ -452,8 +470,10 @@
   function curSysmat(any) {
     const e = App.sysmats[App.cur];
     if (!e || !App.model) return null;
-    if (!e.sm || e.sm.nDet !== App.model.crystals.length || e.sm.nVox !== App.model.image.nVox)
+    if (!e.sm || e.sm.nDet !== App.model.crystals.length || e.sm.nVox !== App.model.image.nVox) {
       e.sm = new SV.Sysmat(e.src, App.model.crystals.length, App.model.image.nVox);
+      e.sm.rot0 = e.rot0 || 0;
+    }
     return any ? e.sm : (e.sm.ok ? e.sm : null);
   }
   function refreshSysmat() {
@@ -461,7 +481,7 @@
     sel.innerHTML = '';
     App.sysmats.forEach((s, i) => {
       const o = document.createElement('option');
-      o.value = i; o.textContent = `${s.src.name} (${SV.bytes(s.src.size)})`;
+      o.value = i; o.textContent = `${s.src.path} (${SV.bytes(s.src.size)})`;
       sel.appendChild(o);
     });
     sel.value = App.cur;
@@ -473,44 +493,94 @@
     refreshChecks();
   }
 
-  function rotForSysmat(sm) { return Math.min(App.state.rot, sm.nRot - 1); }
-  async function showRow() {
+  // global rotation -> slab of the file (MCGen writes rot_begin..rot_end-1 parts); -1: not in the file
+  function rotForSysmat(sm) { const r = App.state.rot - (sm.rot0 || 0); return r >= 0 && r < sm.nRot ? r : -1; }
+  function sysmatFor() {
     const sm = curSysmat();
-    if (!sm) return status(t('stNoSysmat'), true);
+    if (!sm) { status(t('stNoSysmat'), true); return null; }
+    if (rotForSysmat(sm) < 0) { status(t('stRotOut', App.state.rot, sm.rot0, sm.rot0 + sm.nRot - 1), true); return null; }
+    return sm;
+  }
+  // every action gets a sequence number; a result that arrives after a newer action is dropped
+  let actionSeq = 0, sensAbort = null;
+  function newAction(kind) {
+    if (sensAbort) { sensAbort.abort(); sensAbort = null; }
+    App.lastAction = kind;
+    return ++actionSeq;
+  }
+  const fileTag = () => App.sysmats[App.cur].src.name;
+  async function showRow() {
+    const sm = sysmatFor();
+    if (!sm) return;
+    const my = newAction('row');
     const d = SV.clamp(parseInt($('detIdx').value, 10) || 0, 0, sm.nDet - 1), r = rotForSysmat(sm);
     status(t('stRow', d));
-    App.voxValues = { values: await sm.row(r, d), label: t('vRow', d, r), kind: 'row' };
+    const values = await sm.row(r, d);
+    if (my !== actionSeq) return;
+    App.voxValues = { values, label: `${t('vRow', d, App.state.rot)} · ${fileTag()}`, kind: 'row' };
     $('showVoxels').checked = true;
     buildVoxelCloud();
+    showInfo();
     setTab('image');
     status(t('stDone'));
   }
   async function showCol() {
-    const sm = curSysmat();
-    if (!sm) return status(t('stNoSysmat'), true);
+    const sm = sysmatFor();
+    if (!sm) return;
+    const my = newAction('col');
     const v = SV.clamp(parseInt($('voxIdx').value, 10) || 0, 0, sm.nVox - 1), r = rotForSysmat(sm);
     status(t('stCol', v));
-    App.projValues = await sm.column(r, v);
+    const values = await sm.column(r, v);
+    if (my !== actionSeq) return;
+    App.projValues = values;
     App.state.colorBy = 'projection'; $('colorBy').value = 'projection';
-    if (!App.sel || App.sel.kind !== 'voxel' || App.sel.index !== v) { App.sel = { kind: 'voxel', index: v }; showInfo(); }
+    if (!App.sel || App.sel.kind !== 'voxel' || App.sel.index !== v) {   // select the voxel (as App.select, without re-reading)
+      App.sel = { kind: 'voxel', index: v };
+      App.renderer.setSelection(null, -1);
+      buildSelMarker();
+      App.plot.redraw();
+    }
+    showInfo();
     recolorCrystals();
     status(t('stDone'));
   }
   async function showSens() {
-    const sm = curSysmat();
-    if (!sm) return status(t('stNoSysmat'), true);
-    const r = rotForSysmat(sm), bar = $('progress');
+    const sm = sysmatFor();
+    if (!sm) return;
+    const my = newAction('sens');
+    const r = rotForSysmat(sm), bar = $('progress'), ac = new AbortController();
+    sensAbort = ac;
     bar.hidden = false;
-    status(t('stSens', r));
+    status(t('stSens', App.state.rot));
+    let res;
     try {
-      const res = await sm.sums(r, (f) => { bar.firstChild.style.width = `${(100 * f).toFixed(1)}%`; });
-      App.voxValues = { values: res.vox, label: t('vSens', r), kind: 'sens' };
-      App.detSumValues = res.det;
-    } finally { bar.hidden = true; }
+      res = await sm.sums(r, (f) => { bar.firstChild.style.width = `${(100 * f).toFixed(1)}%`; }, ac.signal);
+    } catch (e) {
+      if (ac.signal.aborted) return;                      // superseded by a newer action
+      throw e;
+    } finally {
+      bar.hidden = true;
+      if (sensAbort === ac) sensAbort = null;
+    }
+    if (my !== actionSeq) return;
+    App.voxValues = { values: res.vox, label: `${t('vSens', App.state.rot)} · ${fileTag()}`, kind: 'sens' };
+    App.detSumValues = res.det;
     $('showVoxels').checked = true;
     buildVoxelCloud();
+    showInfo();
     setTab('image');
     status(t('stDone'));
+  }
+  // after the rotation or the matrix file changed: repeat the last view, or drop values that no longer apply
+  function redoLastAction() {
+    const sm = curSysmat();
+    const run = { row: showRow, col: showCol, sens: showSens }[App.lastAction];
+    if (run && sm && rotForSysmat(sm) >= 0) { run().catch(fail); return; }
+    if (sensAbort) { sensAbort.abort(); sensAbort = null; }
+    actionSeq++;
+    App.voxValues = App.projValues = App.detSumValues = null;
+    if (App.state.colorBy === 'projection') { App.state.colorBy = 'muTot'; $('colorBy').value = 'muTot'; }
+    buildVoxelCloud(); recolorCrystals(); showInfo(); App.plot.redraw();
   }
 
   App.windows = function () {
@@ -620,7 +690,7 @@
       App.state.rot = parseInt(e.target.value, 10);
       const I = App.model ? App.model.image : null;
       $('rotLabel').textContent = I ? `${App.state.rot} (${SV.fmt(App.state.rot * I.angle * 180 / Math.PI, 4)}°)` : '0';
-      if (App.model) { buildFov(); buildSelMarker(); showInfo(); App.plot.redraw(); }
+      if (App.model) { buildFov(); buildSelMarker(); showInfo(); App.plot.redraw(); redoLastAction(); }
     });
     document.querySelectorAll('[data-view]').forEach((b) => b.addEventListener('click', () => App.renderer.setView(b.dataset.view)));
     $('upAxis').addEventListener('change', (e) => { App.renderer.setUp(e.target.value); markView(null); });
@@ -628,7 +698,7 @@
     $('orthoCam').addEventListener('change', (e) => { App.renderer.cam.ortho = e.target.checked; App.renderer.dirty = true; });
 
     // sysmat
-    $('sysmatSel').addEventListener('change', (e) => { App.cur = parseInt(e.target.value, 10); refreshSysmat(); });
+    $('sysmatSel').addEventListener('change', (e) => { App.cur = parseInt(e.target.value, 10); refreshSysmat(); if (App.model) redoLastAction(); });
     $('rowBtn').addEventListener('click', () => showRow().catch(fail));
     $('colBtn').addEventListener('click', () => showCol().catch(fail));
     $('sensBtn').addEventListener('click', () => showSens().catch(fail));

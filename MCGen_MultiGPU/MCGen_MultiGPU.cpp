@@ -15,6 +15,9 @@
 //
 // See ReadMe.md for all configuration keys.
 
+#if defined(__linux__)
+#include <unistd.h>
+#endif
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -45,11 +48,21 @@ static std::string dirOf(const std::string& p) {
     return s == std::string::npos ? "." : p.substr(0, s);
 }
 
+// directory of the running executable (argv[0] has no directory when it was found through PATH)
+static std::string exeDir(const char* argv0) {
+#if defined(__linux__)
+    char buf[4096];
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n > 0) { buf[n] = 0; return dirOf(buf); }
+#endif
+    return dirOf(argv0);
+}
+
 static bool writeAll(FILE* f, const float* p, size_t n) { return fwrite(p, sizeof(float), n, f) == n; }
 
 int main(int argc, char* argv[]) {
     Simulation S;
-    S.cfg.set("_exe_dir", dirOf(argv[0]));
+    S.cfg.set("_exe_dir", exeDir(argv[0]));
     std::string err;
     // pass 1: configuration files (positional arguments)
     for (int i = 1; i < argc; ++i) {
@@ -93,7 +106,7 @@ int main(int argc, char* argv[]) {
            C.winMode == kWinGauss ? "gaussian" : C.winMode == kWinIdeal ? "ideal" : "none", C.eresExp);
     printf("Physics              : %s, Rayleigh %s, fluorescence %s, cut %.1f keV\n",
            C.primaryOnly ? "primary_pe (analytic-equivalent)" : C.singleScatter ? "single_scatter (analytic first-order scatter)" : "full",
-           S.cfg.integer("rayleigh", 1) ? "on" : "off", C.fluo ? "on" : "off", C.eCut);
+           S.cfg.flag("rayleigh", true) ? "on" : "off", C.fluo ? "on" : "off", C.eCut);
     if (C.dirRect) {
         printf("Source               : %s in voxel, importance-sampled directions (detector_bias %.2f",
                C.srcUniform ? "uniform" : "centre", C.detBias);
@@ -150,13 +163,17 @@ int main(int argc, char* argv[]) {
         return (int)files.size() - 1;
     };
     std::vector<int> fTotal(C.nWin), fRel(C.nWin, -1);
-    std::vector<std::vector<int>> fCls(C.nWin);
+    std::vector<std::vector<int>> fCls(C.nWin), fClsRel(C.nWin);
     for (int k = 0; k < C.nWin; ++k) {
         std::string w = "win" + std::to_string(k);
         fTotal[k] = open(C.components ? w + "_total" : w);
         if (C.components) {
             static const char* names[] = {"primary", "colscatter", "xtalscatter"};
-            for (int c = 0; c < kNumClasses; ++c) fCls[k].push_back(open(w + "_" + names[c]));
+            for (int c = 0; c < kNumClasses; ++c) {
+                fCls[k].push_back(open(w + "_" + names[c]));
+                // each component's own statistical error (the total's error mostly measures the primary)
+                if (S.saveRelErr) fClsRel[k].push_back(open(w + "_" + names[c] + "_relerr"));
+            }
         }
         if (S.saveRelErr) fRel[k] = open(w + "_relerr");
     }
@@ -211,6 +228,15 @@ int main(int argc, char* argv[]) {
                     for (size_t i = 0; i < slab; ++i) { buf[i] = base[c * slab + i] * scale; sc += buf[i]; }
                     sens[k * (nCls + 1) + 1 + c] += sc;
                     if (!writeAll(files[fCls[k][c]].f, buf.data(), slab)) { fprintf(stderr, "error: write failed\n"); return 1; }
+                    if (S.saveRelErr) {
+                        const float* b1 = base + c * slab;
+                        const float* b2 = out.sum2.data() + ((size_t)k * nCls + c) * slab;
+                        for (size_t i = 0; i < slab; ++i) {
+                            double s1 = b1[i];
+                            buf[i] = s1 > 0 ? (float)std::sqrt(std::max(0.0, b2[i] / (s1 * s1) - 1.0 / N)) : 0.0f;
+                        }
+                        if (!writeAll(files[fClsRel[k][c]].f, buf.data(), slab)) { fprintf(stderr, "error: write failed\n"); return 1; }
+                    }
                 }
             if (S.saveRelErr && !writeAll(files[fRel[k]].f, rel.data(), slab)) { fprintf(stderr, "error: write failed\n"); return 1; }
         }
@@ -279,7 +305,7 @@ int main(int argc, char* argv[]) {
             fprintf(f, "%s{\"lo\":%.4f,\"hi\":%.4f,\"per_crystal\":%s}", k ? "," : "", C.winLo[k], C.winHi[k], C.winAuto[k] ? "true" : "false");
         fprintf(f, "],\n  \"window_mode\": \"%s\",\n", C.winMode == kWinGauss ? "gauss" : C.winMode == kWinIdeal ? "ideal" : "none");
         fprintf(f, "  \"physics\": \"%s\",\n  \"rayleigh\": %s,\n  \"fluorescence\": %s,\n",
-                C.primaryOnly ? "primary_pe" : C.singleScatter ? "single_scatter" : "full", S.cfg.integer("rayleigh", 1) ? "true" : "false", C.fluo ? "true" : "false");
+                C.primaryOnly ? "primary_pe" : C.singleScatter ? "single_scatter" : "full", S.cfg.flag("rayleigh", true) ? "true" : "false", C.fluo ? "true" : "false");
         fprintf(f, "  \"direction_sampling\": \"%s\",\n  \"detector_bias\": %.3f,\n  \"source_sampling\": \"%s\",\n",
                 C.dirRect ? "rect" : "iso", C.detBias, C.srcUniform ? "uniform" : "center");
         fprintf(f, "  \"hole_bias\": %.3f,\n  \"hole_target_layer\": %d,\n", C.holeBias, S.hg.g.tgtLayer);

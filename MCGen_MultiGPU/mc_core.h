@@ -468,6 +468,10 @@ struct Tracer {
 // ---------------------------------------------------------------------------
 MC_HD void transport(const Geometry& G, const Materials& M, const SimConsts& C,
                      Photon ph, Philox& rng, Deposits& D, Stack& S, const Tracer& tr) {
+    // After a boundary the photon is nudged kPush past it, so that the next lookups see the new
+    // region. That nudge is not free flight: the next flight is sampled from the boundary itself
+    // ('back' is the nudge length still owed), otherwise each crossing would skip kPush of material.
+    float back = 0.0f;
     for (int step = 0; step < kMaxSteps; ++step) {
         // ---- majorant and distance to the next region boundary
         float tB = kBig, mu = 0.0f;
@@ -508,10 +512,11 @@ MC_HD void transport(const Geometry& G, const Materials& M, const SimConsts& C,
             tr.vertex(ph.p + ph.d * 30.0f, ph.E, kVtxEscape);
             return;
         }
-        if (mu <= 0.0f) { ph.p = ph.p + ph.d * (tB + kPush); continue; }
+        if (mu <= 0.0f) { ph.p = ph.p + ph.d * (tB + kPush); back = kPush; continue; }
         float s = -logf(rng.uniform()) / mu;
-        if (s >= tB) { ph.p = ph.p + ph.d * (tB + kPush); continue; }
-        ph.p = ph.p + ph.d * s;
+        if (s >= tB + back) { ph.p = ph.p + ph.d * (tB + kPush); back = kPush; continue; }
+        ph.p = ph.p + ph.d * (s - back);
+        back = 0.0f;
 
         // ---- real or virtual collision
         int kind, idx;
@@ -743,7 +748,7 @@ MC_HD float sampleSource(const Geometry& G, const SimConsts& C, int voxel, int r
     float wB = B.ok ? C.detBias : 0.0f;
     float u = rng.uniform();
     if (u < wH) {
-        int k = min((int)(rng.uniform() * T->n), T->n - 1);
+        int k = (int)(((uint64_t)rng.next() * (uint32_t)T->n) >> 32);   // uniform in [0, n)
         float y, cx, cz, hf;
         holeSquare(G, C, T->id[k], y, cx, cz, hf);
         V3 q = make3(cx + (2.0f * rng.uniform() - 1.0f) * hf, y, cz + (2.0f * rng.uniform() - 1.0f) * hf);
@@ -844,7 +849,7 @@ MC_HD void scoreHistory(const Geometry& G, const SimConsts& C, const Deposits& D
         }
         if (spec) {
             int b = (int)(E / C.specBinW);
-            if (b < C.nSpecBins) addF(spec + cls * C.nSpecBins + b, w);
+            if (b >= 0 && b < C.nSpecBins) addF(spec + cls * C.nSpecBins + b, w);
             float Eb = E;
             if (C.winMode == kWinGauss && R0 > 0.0f) Eb += eSigma(C, R0, E) * rng.normal();
             int bb = (int)floorf(Eb / C.specBinW);

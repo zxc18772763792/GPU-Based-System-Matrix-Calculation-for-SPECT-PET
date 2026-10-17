@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <sstream>
@@ -84,13 +85,29 @@ std::string Config::str(const std::string& key, const std::string& def) const {
     auto it = kv_.find(lower(key));
     return it == kv_.end() ? def : it->second;
 }
+// numbers must be complete ("1e6" yes, "1,000" or "2k" no): a typo ends the program instead of being read as 0
 double Config::num(const std::string& key, double def) const {
     std::string s = str(key);
-    return s.empty() ? def : atof(s.c_str());
+    if (s.empty()) return def;
+    char* end = nullptr;
+    double v = strtod(s.c_str(), &end);
+    while (end && (*end == ' ' || *end == '\t')) ++end;
+    if (end == s.c_str() || (end && *end) || !std::isfinite(v)) {
+        fprintf(stderr, "error: %s = '%s' is not a number\n", key.c_str(), s.c_str());
+        exit(1);
+    }
+    return v;
 }
 long long Config::integer(const std::string& key, long long def) const {
-    std::string s = str(key);
-    return s.empty() ? def : (long long)llround(atof(s.c_str()));
+    return (long long)llround(num(key, (double)def));
+}
+bool Config::flag(const std::string& key, bool def) const {
+    std::string s = lower(str(key));
+    if (s.empty()) return def;
+    if (s == "1" || s == "on" || s == "true" || s == "yes") return true;
+    if (s == "0" || s == "off" || s == "false" || s == "no") return false;
+    fprintf(stderr, "error: %s = '%s' must be 1/0, on/off, true/false or yes/no\n", key.c_str(), s.c_str());
+    exit(1);
 }
 std::vector<std::string> Config::keysWithPrefix(const std::string& prefix) const {
     std::vector<std::string> out;
@@ -108,7 +125,7 @@ std::vector<std::string> Config::unusedKeys() const {
 }
 
 // ============================================================ param files
-bool readParamFile(const std::string& path, std::vector<float>& out, size_t minCount, std::string& err) {
+bool readParamFile(const std::string& path, std::vector<float>& out, size_t minCount, std::string& err, size_t* nRead) {
     FILE* f = fopen(path.c_str(), "rb");
     if (!f) { err = "cannot open " + path; return false; }
     fseek(f, 0, SEEK_END);
@@ -119,6 +136,7 @@ bool readParamFile(const std::string& path, std::vector<float>& out, size_t minC
     size_t got = n ? fread(out.data(), sizeof(float), n, f) : 0;
     fclose(f);
     if (got != n) { err = "short read on " + path; return false; }
+    if (nRead) *nRead = n;
     return true;
 }
 
@@ -327,15 +345,15 @@ bool Simulation::setup(std::string& err) {
     std::string dir = cfg.str("params_dir", ".");
     if (!dir.empty() && dir.back() != '/' && dir.back() != '\\') dir += "/";
     params.dir = dir;
-    auto loadP = [&](const char* name, std::vector<float>& v, size_t n) {
+    auto loadP = [&](const char* name, std::vector<float>& v, size_t n, size_t& nReal) {
         std::string e1, e2;
-        if (readParamFile(dir + "Params_" + name + ".dat", v, n, e1)) return true;
-        if (readParamFile(dir + "Param_" + name + ".dat", v, n, e2)) return true;
+        if (readParamFile(dir + "Params_" + name + ".dat", v, n, e1, &nReal)) return true;
+        if (readParamFile(dir + "Param_" + name + ".dat", v, n, e2, &nReal)) return true;
         err = e1;
         return false;
     };
-    if (!loadP("Collimator", params.col, 80000) || !loadP("Detector", params.det, 80000) ||
-        !loadP("Image", params.img, 100) || !loadP("Physics", params.phy, 100))
+    if (!loadP("Collimator", params.col, 80000, params.nCol) || !loadP("Detector", params.det, 80000, params.nDet) ||
+        !loadP("Image", params.img, 100, params.nImg) || !loadP("Physics", params.phy, 100, params.nPhy))
         return false;
     const auto& P = params;
 
@@ -348,6 +366,9 @@ bool Simulation::setup(std::string& err) {
     else if (preset != "none" && !preset.empty()) { err = "unknown preset '" + preset + "' (tc99m | 511 | none)"; return false; }
     C.E0 = (float)cfg.num("energy_kev", presetE > 0 ? presetE : P.phy[7]);
     if (C.E0 <= 0.0f) { err = "photon energy unknown: set energy_keV or preset, or Param_Physics[7]"; return false; }
+    if (P.phy[7] > 0.0f && std::fabs(C.E0 - P.phy[7]) > 0.01f * C.E0)
+        warnings.push_back(fmt("photon energy %.4g keV differs from Param_Physics[7] = ", C.E0) + fmt("%.4g keV: ", P.phy[7]) +
+                           "attenuation coefficients taken from the parameter files ('params' materials) are scaled from that energy");
     if (C.E0 > 1000.0f) { err = "energy above 1 MeV is outside the validity range of this code"; return false; }
 
     std::string winSpec = cfg.str("windows", presetWin.empty() ? "params" : presetWin);
@@ -396,9 +417,11 @@ bool Simulation::setup(std::string& err) {
     if (histPerVoxel <= 0 || histPerVoxel > 4000000000LL) { err = "histories_per_voxel must be in [1, 4e9]"; return false; }
     C.seed = (uint64_t)cfg.integer("seed", 20241221);
     std::string ss = lower(cfg.str("source_sampling", "uniform"));
-    C.srcUniform = ss != "center" && ss != "centre";
+    if (ss != "uniform" && ss != "center" && ss != "centre") { err = "source_sampling must be uniform | center"; return false; }
+    C.srcUniform = ss == "uniform";
     std::string ds = lower(cfg.str("direction_sampling", "rect"));
-    C.dirRect = ds != "iso" && ds != "isotropic";
+    if (ds != "rect" && ds != "iso" && ds != "isotropic") { err = "direction_sampling must be rect | iso"; return false; }
+    C.dirRect = ds == "rect";
     // hole_bias / detector_bias: "auto" (default) is resolved once the collimator is known
     std::string hbSpec = lower(cfg.str("hole_bias", "auto")), dbSpec = lower(cfg.str("detector_bias", "auto"));
     C.tgtMargin = (float)cfg.num("hole_target_margin", 0.25);
@@ -409,16 +432,18 @@ bool Simulation::setup(std::string& err) {
     }
     C.primaryOnly = phys == "primary_pe";
     C.singleScatter = phys == "single_scatter";
-    bool fluo = cfg.integer("fluorescence", 1) != 0;   // read in every mode (no "unknown key" warning)
+    bool fluo = cfg.flag("fluorescence", true);   // read in every mode (no "unknown key" warning)
     C.fluo = !C.primaryOnly && !C.singleScatter && fluo;
-    bool rayleigh = cfg.integer("rayleigh", 1) != 0;
+    bool rayleigh = cfg.flag("rayleigh", true);
     C.eCut = (float)cfg.num("energy_cutoff_kev", 10.0);
-    C.components = cfg.integer("save_components", 0) != 0;
-    saveRelErr = cfg.integer("save_relerr", 0) != 0;
+    C.components = cfg.flag("save_components", false);
+    saveRelErr = cfg.flag("save_relerr", false);
     yield = (float)cfg.num("yield", 1.0);
     C.nSpecBins = (int)cfg.integer("spectrum_bins", 1024);
     C.nSpecBins = std::min(std::max(C.nSpecBins, 16), 1536);
-    C.specBinW = (float)(cfg.num("spectrum_emax_kev", 1.25 * C.E0) / C.nSpecBins);
+    double specMax = cfg.num("spectrum_emax_kev", 1.25 * C.E0);
+    if (!(specMax > 0)) { err = "spectrum_emax_keV must be > 0"; return false; }
+    C.specBinW = (float)(specMax / C.nSpecBins);
     nTally = C.nWin * (C.components ? kNumClasses : 1);
 
     // ------------------------------------------------ materials
@@ -478,7 +503,7 @@ bool Simulation::setup(std::string& err) {
                                  " x " + fmt("%.3g", H) + " mm at y=[" + fmt("%.4g", g.layY1[m]) + "," + fmt("%.4g", g.layY2[m]) + "]");
         // holes
         size_t need = 100 + (size_t)(holeStart + nh) * 9;
-        if (need > P.col.size()) { err = "Params_Collimator is too short for the declared number of holes"; return false; }
+        if (need > P.nCol) { err = "Params_Collimator is too short for the declared number of holes (" + std::to_string(need) + " floats needed, " + std::to_string(P.nCol) + " in the file)"; return false; }
         float maxR = 0, xmin = -W / 2, xmax = W / 2, zmin = -H / 2, zmax = H / 2;
         for (int h = holeStart; h < holeStart + nh; ++h) {
             const float* q = &P.col[100 + (size_t)h * 9];
@@ -530,7 +555,9 @@ bool Simulation::setup(std::string& err) {
     numDet = (int)std::floor(P.det[0] + 0.001f);
     g.nDet = numDet;
     if (numDet <= 0) { err = "no detector bins (Param_Detector[0])"; return false; }
-    if ((size_t)numDet * 12 + 13 > P.det.size()) { err = "Params_Detector is too short for the declared number of detectors"; return false; }
+    if ((size_t)numDet * 12 + 1 > P.nDet) { err = "Params_Detector is too short for the declared number of detectors (" + std::to_string((size_t)numDet * 12 + 1) + " floats needed, " + std::to_string(P.nDet) + " in the file)"; return false; }
+    if ((size_t)numDet * 12 + 1 > 80000)
+        warnings.push_back("more crystals than the analytic modules can read (80000 floats, at most 6666 crystals)");
     std::string xtalDefault = cfg.str("crystal_material", "params");
     double eresOverride = cfg.num("eres", -1.0);
     float bmin[3] = {kBig, kBig, kBig}, bmax[3] = {-kBig, -kBig, -kBig};
@@ -755,7 +782,12 @@ bool Simulation::setup(std::string& err) {
     if (backend != "gpu" && backend != "cpu") { err = "backend must be gpu | cpu"; return false; }
     std::string gl = lower(cfg.str("gpus", "all"));
     if (gl != "all")
-        for (auto& t : split(gl, ", ")) gpus.push_back(atoi(t.c_str()));
+        for (auto& t : split(gl, ", ")) {
+            char* end = nullptr;
+            long id = strtol(t.c_str(), &end, 10);
+            if (end == t.c_str() || *end || id < 0) { err = "gpus must be 'all' or a list of device numbers, e.g. 0,1"; return false; }
+            if (std::find(gpus.begin(), gpus.end(), (int)id) == gpus.end()) gpus.push_back((int)id);
+        }
     cpuThreads = (int)cfg.integer("cpu_threads", 0);
     threadsPerVoxel = (int)cfg.integer("threads_per_voxel", 0);
     voxelChunk = cfg.integer("voxel_chunk", 0);
@@ -766,10 +798,18 @@ bool Simulation::setup(std::string& err) {
         traceVoxel = (C.nZ / 2) * C.nX * C.nY + (C.nY / 2) * C.nX + C.nX / 2;
     traceRot = (int)cfg.integer("trace_rotation", rotBegin);
     traceHist = (int)cfg.integer("trace_histories", 200);
-    traceCapacity = traceVoxel >= 0 ? (int)cfg.integer("trace_max_vertices", 200000) : 0;
+    traceCapacity = (int)std::max<long long>(0, cfg.integer("trace_max_vertices", 200000));
+    if (traceVoxel < 0) traceCapacity = 0;
     if (traceVoxel >= numVox) { err = "trace_voxel out of range"; return false; }
+    if (traceVoxel >= 0 && (traceRot < rotBegin || traceRot >= rotEnd))
+        warnings.push_back("trace_rotation is outside rot_begin..rot_end-1: no tracks are written");
 
     std::string od = cfg.str("output_dir", ".");
+    if (!od.empty() && od != ".") {
+        std::error_code ec;
+        std::filesystem::create_directories(od, ec);
+        if (ec) { err = "cannot create output_dir '" + od + "': " + ec.message(); return false; }
+    }
     if (!od.empty() && od.back() != '/' && od.back() != '\\') od += "/";
     char buf[512];
     snprintf(buf, sizeof(buf), "MC_SysMat_%.1fkeV_shift_%f_%f_%f", C.E0, C.shX, C.shY, C.shZ);

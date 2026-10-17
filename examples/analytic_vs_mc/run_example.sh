@@ -9,7 +9,9 @@
 #                  PEGen_CircularHole -> ScatterGen_CircularHole -components -> MCGen_MultiGPU -gpus $GPU
 #                  build them first: PEGen_*/bd, ScatterGen_RayTracing_CircularHole/bd, (cd MCGen_MultiGPU && make)
 #   cpu:           the same analytic kernels compiled for the CPU (tools/analytic_cpu) and MCGen_CPU
-#                  (cd MCGen_MultiGPU && make cpu); ~10-20 min per case on 4 cores
+#                  (cd MCGen_MultiGPU && make cpu); on 4 cores ~2 h (tc99m) / ~5 h (511), almost all
+#                  of it the analytic scatter
+# Needs python3 with numpy.
 #
 # Results: run_<case>/report.md (tables), run_<case>/flood.svg (detector images), run_<case>/report.json,
 #          run_<case>/timing.md (wall time of every step, MC throughput)
@@ -23,6 +25,10 @@ SCATTER_MODEL=${SCATTER_MODEL:-v2}
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
 OUT=${OUT:-$HERE/run_$CASE}
+case "$MODE" in gpu|cpu) ;; *) echo "mode must be gpu or cpu"; exit 1 ;; esac
+python3 -c 'import numpy' 2>/dev/null || { echo "python3 with numpy is required (pip install numpy)"; exit 1; }
+mkdir -p "$OUT"
+OUT=$(cd "$OUT" && pwd)              # the script changes directory below
 SHIFT=0.000000_0.000000_0.000000
 
 # Geometry shared by both cases: W plate with 3x3 cylindrical pinholes (r 0.75 mm, pitch 12 mm),
@@ -110,7 +116,7 @@ lap "MC mc_model (Compton + photoelectric)"
 "$MC" "$CFG" $MCARGS $MATS -output_prefix mc_full -windows "params,$WIDE_LO-$WIDE_HI" -histories_per_voxel "$NH" > mc_full.log
 lap "MC mc_full (full physics)"
 
-DEV="CPU, $(nproc) threads"
+DEV="CPU, $(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo ?) threads"
 [ "$MODE" = gpu ] && DEV=$(nvidia-smi --query-gpu=name --format=csv,noheader -i "$GPU" 2>/dev/null || echo "GPU $GPU")
 {
   echo "# Timing: $CASE, $MODE ($DEV), $NH histories per voxel, scatter model $SCATTER_MODEL"

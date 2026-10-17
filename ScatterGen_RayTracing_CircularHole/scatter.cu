@@ -982,12 +982,17 @@ __device__ float diffComptonSection(float theta, float E0)
 __device__ float computeComptonIntegral(float E0, float theta_low, float theta_high, float DeltaTheta)
 {
 
+	// midpoint rule with n >= 1 equal steps of at most DeltaTheta over [theta_low, theta_high]
+	// (a fixed step DeltaTheta from theta_low to theta_low + numSteps*DeltaTheta overshot narrow ranges)
 	float total_cross_section = 0.0f;
-	int numSteps = (int)((theta_high - theta_low) / DeltaTheta);
+	if (!(theta_high > theta_low)) return 0.0f;
+	int numSteps = (int)ceilf((theta_high - theta_low) / DeltaTheta);
+	if (numSteps < 1) numSteps = 1;
+	float h = (theta_high - theta_low) / numSteps;
 
-	for (int i = 0; i <= numSteps; ++i) {
-		float theta = theta_low + i * DeltaTheta; 
-		total_cross_section += diffComptonSection(theta, E0) * sin(theta) * DeltaTheta;  
+	for (int i = 0; i < numSteps; ++i) {
+		float theta = theta_low + (i + 0.5f) * h;
+		total_cross_section += diffComptonSection(theta, E0) * sin(theta) * h;
 	}
 
 	return total_cross_section;
@@ -1115,9 +1120,10 @@ __global__ void crystalScatterSysMatCuda(float* dst,
 
 	/////////////////////////////////////////// Threads Allocation ///////////////////////////////////////////
 
-	long long int row = blockIdx.x * blockDim.x + threadIdx.x;
+	// grid x runs over voxels, grid y over detectors (gridDim.y <= 65535 would limit the voxels)
+	long long int row = blockIdx.y * (long long)blockDim.x + threadIdx.x;
 	if (row < 0 || row > numProjectionSingle - 1) { return; }
-	long long int col = blockIdx.y * blockDim.y + threadIdx.y;
+	long long int col = blockIdx.x * (long long)blockDim.y + threadIdx.y;
 	if (col < 0 || col > numImagebin - 1) { return; }
 	long long int slice = blockIdx.z * blockDim.z + threadIdx.z;
 	if (slice < 0 || slice > numProjectionSingle - 1) { return; }
@@ -1217,8 +1223,11 @@ __global__ void crystalScatterSysMatCuda(float* dst,
 
 
 	///////////////  Probability of Compton Scatter Happened on scatter crystal id_Detector //////////////////
-	int PESysMat_index = numImagebin * id_Detector + ImageVoxel_index;
-	float prob_Compton_othercrystal = devicePESysMat[PESysMat_index] * coeff_detector_compton / coeff_detector_pe;
+	long long PESysMat_index = (long long)numImagebin * id_Detector + ImageVoxel_index;
+	// Compton / photoelectric ratio of the scatter crystal id_Detector (not of the detecting crystal)
+	float coeff_scatter_pe = deviceparameter_Detector[id_Detector * 12 + 8];
+	float coeff_scatter_compton = deviceparameter_Detector[id_Detector * 12 + 9];
+	float prob_Compton_othercrystal = coeff_scatter_pe > 0.0f ? devicePESysMat[PESysMat_index] * coeff_scatter_compton / coeff_scatter_pe : 0.0f;
 
 	float x_scatter = deviceparameter_Detector[id_Detector * 12 + 1];
 	float y_scatter = deviceparameter_Detector[id_Detector * 12 + 2] + _float_FOV2Collimator;
@@ -1258,7 +1267,6 @@ __global__ void crystalScatterSysMatCuda(float* dst,
 						float length = 0;
 						float comptonConeAngle = calculateConeAngle(xImage, yImage, zImage, x_scatter, y_scatter, z_scatter, xDetector, yDetector, zDetector);
 						float scatterEnergy = calculateScatterEnergy(comptonConeAngle, target_PE_Energy);
-						float energy_resolution_detector_scatterphoton = energy_resolution_detector_targetPE * sqrt(target_PE_Energy / scatterEnergy); // FWHM/E ~ E^-1/2: worse at lower energy
 						// Relative FWHM scales as R(E) = R0 * sqrt(E0 / E): absolute FWHM grows as sqrt(E), so lower-energy scattered photons have worse relative resolution
 						float energy_resolution_detector_scatterphoton = energy_resolution_detector_targetPE * sqrt(target_PE_Energy / scatterEnergy);
 
@@ -1604,9 +1612,10 @@ __global__ void collimatorScatterSysMatCuda(float* dst,
 	int numImageVoxelZ = (int)floor(deviceparameter_Image[2] + 0.001f);
 
 	//////////////////////////////////////////////////////////////////////////////////////////////////////////
-	long long int row = blockIdx.x * blockDim.x + threadIdx.x;
+	// grid x runs over voxels, grid y over detectors (gridDim.y <= 65535 would limit the voxels)
+	long long int row = blockIdx.y * (long long)blockDim.x + threadIdx.x;
 	if (row < 0 || row > numProjectionSingle - 1) { return; }
-	long long int col = blockIdx.y * blockDim.y + threadIdx.y;
+	long long int col = blockIdx.x * (long long)blockDim.y + threadIdx.y;
 	if (col < 0 || col > numImagebin - 1) { return; }
 	long long int slice = blockIdx.z * blockDim.z + threadIdx.z;
 	if (slice < 0 || slice > numCollimator_Holes - 1) { return; }
@@ -1756,7 +1765,6 @@ __global__ void collimatorScatterSysMatCuda(float* dst,
 
 						float comptonConeAngle = calculateConeAngle(xImage, yImage, zImage, x_scatter, y_scatter, z_scatter, xDetector, yDetector, zDetector);
 						float scatterEnergy = calculateScatterEnergy(comptonConeAngle, target_PE_Energy);
-						float energy_resolution_detector_scatterphoton = energy_resolution_detector_targetPE * sqrt(target_PE_Energy / scatterEnergy); // FWHM/E ~ E^-1/2: worse at lower energy
 						// Relative FWHM scales as R(E) = R0 * sqrt(E0 / E): absolute FWHM grows as sqrt(E), so lower-energy scattered photons have worse relative resolution
 						float energy_resolution_detector_scatterphoton = energy_resolution_detector_targetPE * sqrt(target_PE_Energy / scatterEnergy);
 
@@ -2560,8 +2568,8 @@ __global__ void crystalScatterV2(float* dst, const float* col, const float* xi, 
                                  const float* phy, const float* pe, const unsigned int* bitmapCrystal, S2Col L, S2Hash H,
                                  const int* nbList, int nP, int nI, float peMin)
 {
-    long long i = blockIdx.x * (long long)blockDim.x + threadIdx.x;
-    long long v = blockIdx.y * (long long)blockDim.y + threadIdx.y;
+    long long i = blockIdx.y * (long long)blockDim.x + threadIdx.x;     // grid x: voxels, grid y: detectors
+    long long v = blockIdx.x * (long long)blockDim.y + threadIdx.y;
     long long j = blockIdx.z * (long long)blockDim.z + threadIdx.z;
     if (i >= nP || v >= nI || j >= nP || i == j) return;
     if ((int)floorf(phy[0] + 0.5f) != 1 || det[12 * i + 7] <= 0.01f) return;
@@ -2666,8 +2674,8 @@ __global__ void collimatorScatterShellV2(float* dst, const float* col, const flo
                                          const float* phy, S2Col L, S2Hash H, const int* nbList, int nP, int nI,
                                          int holeOffset, int nHoles)
 {
-    long long i = blockIdx.x * (long long)blockDim.x + threadIdx.x;
-    long long v = blockIdx.y * (long long)blockDim.y + threadIdx.y;
+    long long i = blockIdx.y * (long long)blockDim.x + threadIdx.x;     // grid x: voxels, grid y: detectors
+    long long v = blockIdx.x * (long long)blockDim.y + threadIdx.y;
     long long hs = blockIdx.z * (long long)blockDim.z + threadIdx.z;
     if (i >= nP || v >= nI || hs >= nHoles) return;
     int h = holeOffset + (int)hs;
@@ -2716,8 +2724,8 @@ __global__ void collimatorScatterShellV2(float* dst, const float* col, const flo
 __global__ void collimatorScatterBulkV2(float* dst, const float* col, const float* xi, const float* det, const float* img,
                                         const float* phy, S2Col L, S2Hash H, const int* nbList, int nP, int nI)
 {
-    long long i = blockIdx.x * (long long)blockDim.x + threadIdx.x;
-    long long v = blockIdx.y * (long long)blockDim.y + threadIdx.y;
+    long long i = blockIdx.y * (long long)blockDim.x + threadIdx.x;     // grid x: voxels, grid y: detectors
+    long long v = blockIdx.x * (long long)blockDim.y + threadIdx.y;
     int m = (int)(blockIdx.z * blockDim.z + threadIdx.z);
     if (i >= nP || v >= nI || m >= L.n) return;
     float T = L.y2[m] - L.y1[m], mu0 = L.mu[m].pe + L.mu[m].c;
@@ -2906,12 +2914,12 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 	}
 	else
 	{
-		cudaSetDevice(cuda_id);
+		cudaCheckError(cudaSetDevice(cuda_id));
 		cout << "Set Device to Device " <<cuda_id<< endl;
 	}
 
 	cudaStream_t stream;
-	cudaStreamCreate(&stream);
+	cudaCheckError(cudaStreamCreate(&stream));
 	//////////////////////////// Promary Compton Scatter between Crystals ////////////////////////////
 
 	////------------------------- Geometry RelationShip between Crystals -------------------------////
@@ -2919,7 +2927,7 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 	// crystal_i and crystal_j, then deviceGeometryRelationShip_Crystal[i,j,k]=1,else =0.
 	// The array deviceGeometryRelationShip_Crystal is a bitmap, the stored by bit, the index follows the below ruls:
 	cout << "Start Calculate or IO Geometry RelationShip between Crystals "<< endl;
-	int unique_pairs = numProjectionSingle * (numProjectionSingle + 1) / 2;
+	long long unique_pairs = (long long)numProjectionSingle * (numProjectionSingle + 1) / 2;
 	long long total_bits = static_cast<long long>(unique_pairs) * static_cast<long long>(numProjectionSingle);
 	int bits_per_word = 32;
 	long long array_size = (total_bits + bits_per_word - 1) / bits_per_word;
@@ -2933,53 +2941,53 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 
 
 	float* h_parameter_Collimator;
-	cudaMallocHost(&h_parameter_Collimator, sizeof(float) * 80000);
+	cudaCheckError(cudaMallocHost(&h_parameter_Collimator, sizeof(float) * 80000));
 	memcpy(h_parameter_Collimator, parameter_Collimator, sizeof(float) * 80000);
 
 	float* h_parameter_Detector;
-	cudaMallocHost(&h_parameter_Detector, sizeof(float) * 80000);
+	cudaCheckError(cudaMallocHost(&h_parameter_Detector, sizeof(float) * 80000));
 	memcpy(h_parameter_Detector, parameter_Detector, sizeof(float) * 80000);
 
 	float* h_parameter_Image;
-	cudaMallocHost(&h_parameter_Image, sizeof(float) * 100);
+	cudaCheckError(cudaMallocHost(&h_parameter_Image, sizeof(float) * 100));
 	memcpy(h_parameter_Image, parameter_Image, sizeof(float) * 100);
 
 	float* h_parameter_Physics;
-	cudaMallocHost(&h_parameter_Physics, sizeof(float) * 100);
+	cudaCheckError(cudaMallocHost(&h_parameter_Physics, sizeof(float) * 100));
 	memcpy(h_parameter_Physics, parameter_Physics, sizeof(float) * 100);
 
 	float* h_PE_SysMat;
-	cudaMallocHost(&h_PE_SysMat, sizeof(float) * numProjectionSingle * numImagebin);
+	cudaCheckError(cudaMallocHost(&h_PE_SysMat, sizeof(float) * numProjectionSingle * numImagebin));
 	memcpy(h_PE_SysMat, PE_SysMat, sizeof(float) * numProjectionSingle * numImagebin);
 
 	// Allocate memory on device
 	float* deviceMatrix_crystal;
-	cudaMalloc(&deviceMatrix_crystal, sizeof(float) * numProjectionSingle * numImagebin);
-	cudaMemset(deviceMatrix_crystal, 0, sizeof(float) * numProjectionSingle * numImagebin);
+	cudaCheckError(cudaMalloc(&deviceMatrix_crystal, sizeof(float) * numProjectionSingle * numImagebin));
+	cudaCheckError(cudaMemset(deviceMatrix_crystal, 0, sizeof(float) * numProjectionSingle * numImagebin));
 
 	float* deviceMatrix_collimator;
-	cudaMalloc(&deviceMatrix_collimator, sizeof(float) * numProjectionSingle * numImagebin);
-	cudaMemset(deviceMatrix_collimator, 0, sizeof(float) * numProjectionSingle * numImagebin);
+	cudaCheckError(cudaMalloc(&deviceMatrix_collimator, sizeof(float) * numProjectionSingle * numImagebin));
+	cudaCheckError(cudaMemset(deviceMatrix_collimator, 0, sizeof(float) * numProjectionSingle * numImagebin));
 
 	float* devicePEMatrix;
-	cudaMalloc(&devicePEMatrix, sizeof(float) * numProjectionSingle * numImagebin);
-	cudaMemcpyAsync(devicePEMatrix, h_PE_SysMat, sizeof(float) * numProjectionSingle * numImagebin, cudaMemcpyHostToDevice, stream);
+	cudaCheckError(cudaMalloc(&devicePEMatrix, sizeof(float) * numProjectionSingle * numImagebin));
+	cudaCheckError(cudaMemcpyAsync(devicePEMatrix, h_PE_SysMat, sizeof(float) * numProjectionSingle * numImagebin, cudaMemcpyHostToDevice, stream));
 
 	float* deviceparameter_Collimator;
-	cudaMalloc(&deviceparameter_Collimator, sizeof(float) * 80000);
-	cudaMemcpyAsync(deviceparameter_Collimator, h_parameter_Collimator, sizeof(float) * 80000, cudaMemcpyHostToDevice, stream);
+	cudaCheckError(cudaMalloc(&deviceparameter_Collimator, sizeof(float) * 80000));
+	cudaCheckError(cudaMemcpyAsync(deviceparameter_Collimator, h_parameter_Collimator, sizeof(float) * 80000, cudaMemcpyHostToDevice, stream));
 
 	float* deviceparameter_Detector;
-	cudaMalloc(&deviceparameter_Detector, sizeof(float) * 80000);
-	cudaMemcpyAsync(deviceparameter_Detector, h_parameter_Detector, sizeof(float) * 80000, cudaMemcpyHostToDevice, stream);
+	cudaCheckError(cudaMalloc(&deviceparameter_Detector, sizeof(float) * 80000));
+	cudaCheckError(cudaMemcpyAsync(deviceparameter_Detector, h_parameter_Detector, sizeof(float) * 80000, cudaMemcpyHostToDevice, stream));
 
 	float* deviceparameter_Image;
-	cudaMalloc(&deviceparameter_Image, sizeof(float) * 100);
-	cudaMemcpyAsync(deviceparameter_Image, h_parameter_Image, sizeof(float) * 100, cudaMemcpyHostToDevice, stream);
+	cudaCheckError(cudaMalloc(&deviceparameter_Image, sizeof(float) * 100));
+	cudaCheckError(cudaMemcpyAsync(deviceparameter_Image, h_parameter_Image, sizeof(float) * 100, cudaMemcpyHostToDevice, stream));
 
 	float* deviceparameter_Physics;
-	cudaMalloc(&deviceparameter_Physics, sizeof(float) * 100);
-	cudaMemcpyAsync(deviceparameter_Physics, h_parameter_Physics, sizeof(float) * 100, cudaMemcpyHostToDevice, stream);
+	cudaCheckError(cudaMalloc(&deviceparameter_Physics, sizeof(float) * 100));
+	cudaCheckError(cudaMemcpyAsync(deviceparameter_Physics, h_parameter_Physics, sizeof(float) * 100, cudaMemcpyHostToDevice, stream));
 
 
 	int flagCalculateCrystalGeometryRelationShip = (int)floor(parameter_Physics[8]);
@@ -3000,10 +3008,10 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 			deviceGeometryRelationShip_Crystal2Crystal,
 			deviceparameter_Detector);
 
-		cudaStreamSynchronize(stream);
-		cudaMemcpyAsync(hostGeometryRelationShip_Crystal2Crystal, deviceGeometryRelationShip_Crystal2Crystal, sizeof(unsigned int) * array_size, cudaMemcpyDeviceToHost, stream);
+		cudaCheckError(cudaStreamSynchronize(stream));
+		cudaCheckError(cudaMemcpyAsync(hostGeometryRelationShip_Crystal2Crystal, deviceGeometryRelationShip_Crystal2Crystal, sizeof(unsigned int) * array_size, cudaMemcpyDeviceToHost, stream));
 
-		cudaStreamSynchronize(stream);
+		cudaCheckError(cudaStreamSynchronize(stream));
 
 		cudaCheckError(cudaGetLastError());
 		cudaCheckError(cudaDeviceSynchronize());
@@ -3011,8 +3019,8 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 
 		FILE* fp4;
 		fp4 = fopen(FnameGeoCrystal, "wb+");
-		if (fp4 == 0) { puts("error"); exit(0); }
-		fwrite(hostGeometryRelationShip_Crystal2Crystal, sizeof(unsigned int), array_size, fp4);
+		if (fp4 == 0) { fprintf(stderr, "error: cannot create %s\n", FnameGeoCrystal); exit(EXIT_FAILURE); }
+		if (fwrite(hostGeometryRelationShip_Crystal2Crystal, sizeof(unsigned int), array_size, fp4) != (size_t)array_size) { fprintf(stderr, "error: writing %s failed\n", FnameGeoCrystal); exit(EXIT_FAILURE); }
 		fclose(fp4);
 		
 		cout << "Kernel geometryRelationShip_Crystal2Crystal executed." << endl;
@@ -3023,22 +3031,24 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 		auto start_ioGeoCrystal = std::chrono::high_resolution_clock::now();
 		FILE* fp4;
 		fp4 = fopen(FnameGeoCrystal, "rb");
-		if (fp4 == 0) { puts("error"); exit(0); }
-		fread(hostGeometryRelationShip_Crystal2Crystal, sizeof(unsigned int), array_size, fp4);
+		if (fp4 == 0) { fprintf(stderr, "error: cannot open the geometry bitmap %s\n", FnameGeoCrystal); exit(EXIT_FAILURE); }
+		size_t gotBits = fread(hostGeometryRelationShip_Crystal2Crystal, sizeof(unsigned int), array_size, fp4);
+		bool extraBits = fgetc(fp4) != EOF;
 		fclose(fp4);
+		if (gotBits != (size_t)array_size || extraBits) { fprintf(stderr, "error: %s does not match this geometry (%lld words expected); recompute it (Param_Physics[8] / [9] = 1)\n", FnameGeoCrystal, (long long)array_size); exit(EXIT_FAILURE); }
 		auto end_ioGeoCrystal = std::chrono::high_resolution_clock::now();
 		auto duration_ioGeoCrystal = std::chrono::duration_cast<std::chrono::milliseconds>(end_ioGeoCrystal - start_ioGeoCrystal);
 		cout << "Time of io Crystal Geometry System Matrix: " << duration_ioGeoCrystal.count() << " ms" << endl;
 
 	}
 	
-	cudaMalloc(&deviceGeometryRelationShip_Crystal2Crystal, sizeof(unsigned int) * array_size);
-	cudaMemcpyAsync(deviceGeometryRelationShip_Crystal2Crystal, hostGeometryRelationShip_Crystal2Crystal, sizeof(unsigned int) * array_size, cudaMemcpyHostToDevice, stream);
+	cudaCheckError(cudaMalloc(&deviceGeometryRelationShip_Crystal2Crystal, sizeof(unsigned int) * array_size));
+	cudaCheckError(cudaMemcpyAsync(deviceGeometryRelationShip_Crystal2Crystal, hostGeometryRelationShip_Crystal2Crystal, sizeof(unsigned int) * array_size, cudaMemcpyHostToDevice, stream));
 
 	dim3 blockSize(16, 16, 1); 
 	dim3 gridSize(
-		(numProjectionSingle + 15) / 16, 
-		(numImagebin + 15) / 16,         
+		(numImagebin + 15) / 16,                 // voxels on grid x (gridDim.y is limited to 65535)
+		(numProjectionSingle + 15) / 16,
 		(numProjectionSingle + 0) / 1
 	);
 
@@ -3061,21 +3071,21 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 	if (model == 2)
 	{
 		s2_crystalInfo(h_parameter_Detector, h_parameter_Image[11], hostCrystalInfo);
-		cudaMalloc(&deviceCrystalInfo, sizeof(float) * hostCrystalInfo.size());
-		cudaMemcpy(deviceCrystalInfo, hostCrystalInfo.data(), sizeof(float) * hostCrystalInfo.size(), cudaMemcpyHostToDevice);
+		cudaCheckError(cudaMalloc(&deviceCrystalInfo, sizeof(float) * hostCrystalInfo.size()));
+		cudaCheckError(cudaMemcpy(deviceCrystalInfo, hostCrystalInfo.data(), sizeof(float) * hostCrystalInfo.size(), cudaMemcpyHostToDevice));
 		layers = s2_layers(h_parameter_Collimator, h_parameter_Image[11]);
 		s2_holeHash(h_parameter_Collimator, layers, hashIdx, hashCnt, hash);
 		s2_neighbours(hostCrystalInfo, numProjectionSingle, neighbours);
-		cudaMalloc(&deviceHashIdx, sizeof(int) * hashIdx.size());
-		cudaMemcpy(deviceHashIdx, hashIdx.data(), sizeof(int) * hashIdx.size(), cudaMemcpyHostToDevice);
-		cudaMalloc(&deviceHashCnt, sizeof(int) * hashCnt.size());
-		cudaMemcpy(deviceHashCnt, hashCnt.data(), sizeof(int) * hashCnt.size(), cudaMemcpyHostToDevice);
-		cudaMalloc(&deviceNeighbours, sizeof(int) * neighbours.size());
-		cudaMemcpy(deviceNeighbours, neighbours.data(), sizeof(int) * neighbours.size(), cudaMemcpyHostToDevice);
+		cudaCheckError(cudaMalloc(&deviceHashIdx, sizeof(int) * hashIdx.size()));
+		cudaCheckError(cudaMemcpy(deviceHashIdx, hashIdx.data(), sizeof(int) * hashIdx.size(), cudaMemcpyHostToDevice));
+		cudaCheckError(cudaMalloc(&deviceHashCnt, sizeof(int) * hashCnt.size()));
+		cudaCheckError(cudaMemcpy(deviceHashCnt, hashCnt.data(), sizeof(int) * hashCnt.size(), cudaMemcpyHostToDevice));
+		cudaCheckError(cudaMalloc(&deviceNeighbours, sizeof(int) * neighbours.size()));
+		cudaCheckError(cudaMemcpy(deviceNeighbours, neighbours.data(), sizeof(int) * neighbours.size(), cudaMemcpyHostToDevice));
 		hash.idx = deviceHashIdx;
 		hash.cnt = deviceHashCnt;
 		float peMin = s2_peMin(h_PE_SysMat, (size_t)numProjectionSingle * numImagebin);
-		cudaStreamSynchronize(stream);
+		cudaCheckError(cudaStreamSynchronize(stream));
 		cout << "Kernel crystalScatterV2 Launched (scatter model v2)" << endl;
 		crystalScatterV2 <<<gridSize, blockSize >>> (deviceMatrix_crystal, deviceparameter_Collimator, deviceCrystalInfo,
 			deviceparameter_Detector, deviceparameter_Image, deviceparameter_Physics, devicePEMatrix,
@@ -3094,19 +3104,20 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 		numProjectionSingle,
 		numImagebin);
 	}
+	cudaCheckError(cudaGetLastError());
 	
 	float* h_Crystal_SysMat;
-	cudaMallocHost(&h_Crystal_SysMat, sizeof(float) * numProjectionSingle * numImagebin);
-	cudaMemcpyAsync(h_Crystal_SysMat, deviceMatrix_crystal, sizeof(float) * numProjectionSingle * numImagebin, cudaMemcpyDeviceToHost, stream);
+	cudaCheckError(cudaMallocHost(&h_Crystal_SysMat, sizeof(float) * numProjectionSingle * numImagebin));
+	cudaCheckError(cudaMemcpyAsync(h_Crystal_SysMat, deviceMatrix_crystal, sizeof(float) * numProjectionSingle * numImagebin, cudaMemcpyDeviceToHost, stream));
 	cudaCheckError(cudaGetLastError());
-	cudaStreamSynchronize(stream);
+	cudaCheckError(cudaStreamSynchronize(stream));
 	
 	/* // Write CrystalScatter_SysMat.sysmat for debug
 	char Fnametmp[2048];
 	sprintf(Fnametmp, "CrystalScatter_SysMat.sysmat");
 	FILE* fptmp;
 	fptmp = fopen(Fnametmp, "wb+");
-	if (fptmp == 0) { puts("error"); exit(0); }
+	if (fptmp == 0) { puts("error"); exit(EXIT_FAILURE); }
 	fwrite(h_Crystal_SysMat, sizeof(float), numProjectionSingle * numImagebin, fptmp);
 	fclose(fptmp);
 	cout << "Write Results of crystalScatterSysMatCuda function finished " << endl;
@@ -3116,7 +3127,7 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 	auto end_crystalScatterSysMatCuda = std::chrono::high_resolution_clock::now();
 	auto duration_crystalScatterSysMatCuda = std::chrono::duration_cast<std::chrono::milliseconds>(end_crystalScatterSysMatCuda - start_crystalScatterSysMatCuda);
 	cout << "Time of crystalScatterSysMatCuda function: " << duration_crystalScatterSysMatCuda.count()/1000.0/60.0 << " min" << endl;
-	cudaStreamSynchronize(stream);
+	cudaCheckError(cudaStreamSynchronize(stream));
 	cudaFreeHost(h_PE_SysMat);
 	cudaFree(devicePEMatrix);
 	cudaFree(deviceMatrix_crystal);
@@ -3128,7 +3139,7 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 
 	///////////////// Promary Compton Scatter between Collimator and Detector Crystal /////////////////
 	float* h_Collimator_SysMat;
-	cudaMallocHost(&h_Collimator_SysMat, sizeof(float) * numProjectionSingle * numImagebin);
+	cudaCheckError(cudaMallocHost(&h_Collimator_SysMat, sizeof(float) * numProjectionSingle * numImagebin));
 	unsigned int* deviceGeometryRelationShip_Collimator2Crystal = 0;
 	unsigned int* hostGeometryRelationShip_Collimator2Crystal = 0;
 	auto start_CollimatorScatterSysMatCuda = std::chrono::high_resolution_clock::now();
@@ -3140,14 +3151,14 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 		for (int off = 0; off < layers.totalHoles; off += 65535)
 		{
 			int n = min(65535, layers.totalHoles - off);
-			dim3 gridShell((numProjectionSingle + 15) / 16, (numImagebin + 15) / 16, n);
+			dim3 gridShell((numImagebin + 15) / 16, (numProjectionSingle + 15) / 16, n);
 			collimatorScatterShellV2 <<<gridShell, blockSize_collimator >>> (deviceMatrix_collimator, deviceparameter_Collimator,
 				deviceCrystalInfo, deviceparameter_Detector, deviceparameter_Image, deviceparameter_Physics, layers, hash,
 				deviceNeighbours, numProjectionSingle, numImagebin, off, n);
 		}
 		if (layers.n > 0)
 		{
-			dim3 gridBulk((numProjectionSingle + 15) / 16, (numImagebin + 15) / 16, layers.n);
+			dim3 gridBulk((numImagebin + 15) / 16, (numProjectionSingle + 15) / 16, layers.n);
 			collimatorScatterBulkV2 <<<gridBulk, blockSize_collimator >>> (deviceMatrix_collimator, deviceparameter_Collimator,
 				deviceCrystalInfo, deviceparameter_Detector, deviceparameter_Image, deviceparameter_Physics, layers, hash,
 				deviceNeighbours, numProjectionSingle, numImagebin);
@@ -3194,11 +3205,11 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 			deviceparameter_Detector,
 			deviceparameter_Collimator);
 
-		cudaStreamSynchronize(stream);
+		cudaCheckError(cudaStreamSynchronize(stream));
 
-		cudaMemcpyAsync(hostGeometryRelationShip_Collimator2Crystal, deviceGeometryRelationShip_Collimator2Crystal, sizeof(unsigned int) * array_size, cudaMemcpyDeviceToHost, stream);
+		cudaCheckError(cudaMemcpyAsync(hostGeometryRelationShip_Collimator2Crystal, deviceGeometryRelationShip_Collimator2Crystal, sizeof(unsigned int) * array_size, cudaMemcpyDeviceToHost, stream));
 
-		cudaStreamSynchronize(stream);
+		cudaCheckError(cudaStreamSynchronize(stream));
 
 		cudaCheckError(cudaGetLastError());
 		cudaCheckError(cudaDeviceSynchronize());
@@ -3206,8 +3217,8 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 
 		FILE* fp4;
 		fp4 = fopen(FnameGeoCollimator, "wb+");
-		if (fp4 == 0) { puts("error"); exit(0); }
-		fwrite(hostGeometryRelationShip_Collimator2Crystal, sizeof(unsigned int), array_size, fp4);
+		if (fp4 == 0) { fprintf(stderr, "error: cannot create %s\n", FnameGeoCollimator); exit(EXIT_FAILURE); }
+		if (fwrite(hostGeometryRelationShip_Collimator2Crystal, sizeof(unsigned int), array_size, fp4) != (size_t)array_size) { fprintf(stderr, "error: writing %s failed\n", FnameGeoCollimator); exit(EXIT_FAILURE); }
 		fclose(fp4);
 
 		cout << "Kernel geometryRelationShip_Collimator2Crystal executed." << endl;
@@ -3218,9 +3229,11 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 		auto start_ioGeoCollimator = std::chrono::high_resolution_clock::now();
 		FILE* fp4;
 		fp4 = fopen(FnameGeoCollimator, "rb");
-		if (fp4 == 0) { puts("error"); exit(0); }
-		fread(hostGeometryRelationShip_Collimator2Crystal, sizeof(unsigned int), array_size, fp4);
+		if (fp4 == 0) { fprintf(stderr, "error: cannot open the geometry bitmap %s\n", FnameGeoCollimator); exit(EXIT_FAILURE); }
+		size_t gotBits = fread(hostGeometryRelationShip_Collimator2Crystal, sizeof(unsigned int), array_size, fp4);
+		bool extraBits = fgetc(fp4) != EOF;
 		fclose(fp4);
+		if (gotBits != (size_t)array_size || extraBits) { fprintf(stderr, "error: %s does not match this geometry (%lld words expected); recompute it (Param_Physics[8] / [9] = 1)\n", FnameGeoCollimator, (long long)array_size); exit(EXIT_FAILURE); }
 		auto end_ioGeoCollimator = std::chrono::high_resolution_clock::now();
 		auto duration_ioGeoCollimator = std::chrono::duration_cast<std::chrono::milliseconds>(end_ioGeoCollimator - start_ioGeoCollimator);
 		cout << "Time of io GeoCollimator System Matrix: " << duration_ioGeoCollimator.count() << " ms" << endl;
@@ -3228,14 +3241,14 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 	}
 
 	// Copy to device
-	cudaMalloc(&deviceGeometryRelationShip_Collimator2Crystal, sizeof(unsigned int) * array_size);
-	cudaMemcpyAsync(deviceGeometryRelationShip_Collimator2Crystal, hostGeometryRelationShip_Collimator2Crystal, sizeof(unsigned int) * array_size, cudaMemcpyHostToDevice, stream);
-	cudaStreamSynchronize(stream);
+	cudaCheckError(cudaMalloc(&deviceGeometryRelationShip_Collimator2Crystal, sizeof(unsigned int) * array_size));
+	cudaCheckError(cudaMemcpyAsync(deviceGeometryRelationShip_Collimator2Crystal, hostGeometryRelationShip_Collimator2Crystal, sizeof(unsigned int) * array_size, cudaMemcpyHostToDevice, stream));
+	cudaCheckError(cudaStreamSynchronize(stream));
 
 	dim3 blockSize_collimator(16, 16, 1);
 	dim3 gridSize_collimator(
-		(numProjectionSingle + 15) / 16,
 		(numImagebin + 15) / 16,
+		(numProjectionSingle + 15) / 16,
 		(numCollimator_Holes + 0) / 1
 	);
 
@@ -3262,15 +3275,16 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 	cudaError_t err = cudaGetLastError();
 	if (err != cudaSuccess) {
 		std::cerr << "Kernel collimatorScatterSysMatCuda launch failed: " << cudaGetErrorString(err) << std::endl;
+		exit(EXIT_FAILURE);
 	}
-	cudaMemcpyAsync(h_Collimator_SysMat, deviceMatrix_collimator, sizeof(float) * numProjectionSingle * numImagebin, cudaMemcpyDeviceToHost, stream);
+	cudaCheckError(cudaMemcpyAsync(h_Collimator_SysMat, deviceMatrix_collimator, sizeof(float) * numProjectionSingle * numImagebin, cudaMemcpyDeviceToHost, stream));
 	cudaCheckError(cudaGetLastError());
-	cudaStreamSynchronize(stream);
+	cudaCheckError(cudaStreamSynchronize(stream));
 	
 	/* // Write CollimatorScatter_SysMat.sysmat for debug
 	sprintf(Fnametmp, "CollimatorScatter_SysMat.sysmat");
 	fptmp = fopen(Fnametmp, "wb+");
-	if (fptmp == 0) { puts("error"); exit(0); }
+	if (fptmp == 0) { puts("error"); exit(EXIT_FAILURE); }
 	fwrite(h_Collimator_SysMat, sizeof(float), numProjectionSingle * numImagebin, fptmp);
 	fclose(fptmp);
 	cout << "Write Results of CollimatorScatterSysMatCuda function finished " << endl;

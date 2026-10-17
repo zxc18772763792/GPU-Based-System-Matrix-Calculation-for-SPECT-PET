@@ -1,6 +1,11 @@
-export PATH="/usr/local/cuda-12.6/bin":$PATH
-export LD_LIBRARY_PATH="/usr/local/cuda-12.6/lib64":$LD_LIBRARY_PATH
-export LIBRARY_PATH="/usr/local/cuda-12.6/lib64":$LIBRARY_PATH
+#!/bin/sh
+# build MCGen_MultiGPU:  ./bd   (CUDA_HOME=/path/to/cuda ./bd for another CUDA installation; or use make)
+set -e
+cd "$(dirname "$0")"
+CUDA_HOME=${CUDA_HOME:-/usr/local/cuda-12.6}
+export PATH="$CUDA_HOME/bin:$PATH"
+export LD_LIBRARY_PATH="$CUDA_HOME/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LIBRARY_PATH="$CUDA_HOME/lib64${LIBRARY_PATH:+:$LIBRARY_PATH}"
 
 # GPU architecture: "native" = the cards in this machine. For a mixed cluster use e.g.
 #   CUDA_ARCH="-gencode arch=compute_80,code=sm_80 -gencode arch=compute_89,code=sm_89" ./bd
@@ -8,4 +13,4 @@ CUDA_ARCH=${CUDA_ARCH:--arch=native}
 
 nvcc -O3 -std=c++17 -lineinfo $CUDA_ARCH -DMC_WITH_CUDA -c mc_gpu.cu -o mc_gpu.o
 g++ -O3 -std=c++17 -DMC_WITH_CUDA -c MCGen_MultiGPU.cpp mc_host.cpp mc_cpu.cpp
-g++ -o MCGen_MultiGPU MCGen_MultiGPU.o mc_host.o mc_cpu.o mc_gpu.o -lcudart -L/usr/local/cuda-12.6/lib64 -pthread
+g++ -o MCGen_MultiGPU MCGen_MultiGPU.o mc_host.o mc_cpu.o mc_gpu.o -L"$CUDA_HOME/lib64" -lcudart -pthread

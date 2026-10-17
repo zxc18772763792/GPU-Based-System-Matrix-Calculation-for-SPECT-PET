@@ -65,6 +65,8 @@ def main():
     B = np.memmap(args.b, np.float32, "r", shape=(nrot, ndet, nvox))
     R = np.memmap(args.relerr, np.float32, "r", shape=(nrot, ndet, nvox)) if args.relerr else None
 
+    if args.rot >= nrot:
+        sys.exit(f"--rot {args.rot}: the matrices have {nrot} rotation(s)")
     rots = [args.rot] if args.rot >= 0 else range(nrot)
     print(f"{nrot} rotation(s) x {ndet} detectors x {nvox} voxels")
     print("rot   sum(A)        sum(B)        B/A      voxel-sens ratio (mean / std / min / max)   95%-signal wrms   z mean / rms / |z|>3 (relerr < zcut)")
@@ -81,14 +83,17 @@ def main():
         idx = order[:k]
         rel = (b.ravel()[idx] - flat[idx]) / flat[idx] if k else np.zeros(1)
         w = flat[idx] if k else np.ones(1)
+        vr = (f"{ratio.mean():.4f} / {ratio.std():.4f} / {ratio.min():.4f} / {ratio.max():.4f}" if ratio.size
+              else "       -  (A is zero)                ")
+        wr = f"{np.sqrt(np.average(rel ** 2, weights=w)):.4f}" if k else "     -"
         line = (f"{r:3d}  {a.sum():.5e}  {b.sum():.5e}  {b.sum() / a.sum() if a.sum() > 0 else float('nan'):7.4f}   "
-                f"{ratio.mean():.4f} / {ratio.std():.4f} / {ratio.min():.4f} / {ratio.max():.4f}        "
-                f"{np.sqrt(np.average(rel ** 2, weights=w)):.4f}")
+                f"{vr}        {wr}")
         if R is not None:
             rr = np.asarray(R[r], dtype=np.float64)
             m = (a > 0) & (b > 0) & (rr > 0) & (rr < args.zcut)
             z = (b[m] - a[m]) / (rr[m] * b[m])
-            line += f"        {z.mean():.3f} / {np.sqrt((z ** 2).mean()):.3f} / {100 * np.mean(np.abs(z) > 3):.2f}%"
+            line += (f"        {z.mean():.3f} / {np.sqrt((z ** 2).mean()):.3f} / {100 * np.mean(np.abs(z) > 3):.2f}%"
+                     if z.size else "        -")
         print(line)
 
 

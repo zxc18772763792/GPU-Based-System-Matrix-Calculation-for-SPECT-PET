@@ -16,6 +16,8 @@
 // original author: xingchun zheng @ tsinghua university
 
 #include <iostream>
+#include <vector>
+#include <algorithm>
 #define _USE_MATH_DEFINES
 #include <math.h>
 #include "PESysMatGen.h"
@@ -360,6 +362,79 @@ __device__ float length_cylinder_ray(
 
 
 // ============================================================================
+// Limits of the per-thread lists (beyond them the kernel scans everything: slower, never wrong)
+// ============================================================================
+#define PE_MAX_LAYERS 10        // collimator layers (the parameter format holds at most 9)
+#ifndef PE_MAX_HOLES
+#define PE_MAX_HOLES 256        // holes a voxel -> crystal cone can cross
+#endif
+#ifndef PE_MAX_CROSS_DET
+#define PE_MAX_CROSS_DET 256    // other crystals a voxel -> crystal cone can cross
+#endif
+
+// Can a ray from the voxel to crystal idxDet pass through crystal id?  (cones around the two
+// voxel -> crystal-centre directions with the half-angles of the crystals' bounding spheres overlap)
+__device__ inline bool peCrossCandidate(const float* devDet, int id, int idxDet, float fov2col,
+                                        float xImage, float yImage, float zImage,
+                                        float xDir, float yDir, float zDir, float crit_self)
+{
+    if (id == idxDet) return false;
+    float ow = devDet[12*id+4], ot = devDet[12*id+5], oh = devDet[12*id+6];
+    if (devDet[12*id+7] <= 0.01f) return false;
+    float ox = devDet[12*id+1], oy = devDet[12*id+2]+fov2col, oz = devDet[12*id+3];
+    float od = sqrtf((xImage-ox)*(xImage-ox)+(yImage-oy)*(yImage-oy)+(zImage-oz)*(zImage-oz));
+    float crit_o = sqrtf(ow*ow+oh*oh+ot*ot) / od / 2.0f;
+    float dxo = (ox-xImage)/od, dyo = (oy-yImage)/od, dzo = (oz-zImage)/od;
+    float ad = sqrtf((dxo-xDir)*(dxo-xDir)+(dyo-yDir)*(dyo-yDir)+(dzo-zDir)*(dzo-zDir));
+    return ad <= crit_o + crit_self;
+}
+
+// Spatial hash of the collimator holes (host): every hole is listed in all cells its disk overlaps;
+// cells hold as many holes as needed (no truncation).
+struct PEHoleHash {
+    std::vector<int> idx, cnt;
+    float originX, originZ, cellSize, maxR;
+    int nx, nz, maxPerCell, totalHoles;
+};
+static PEHoleHash pe_buildHoleHash(const float* col)
+{
+    PEHoleHash g;
+    int nLayers = (int)floorf(col[0] + 0.001f);
+    g.totalHoles = 0;
+    for (int l = 0; l < nLayers; l++) g.totalHoles += (int)col[(l+1)*10];
+    float colW = col[11], colH = col[13];
+    g.maxR = 0.0f;
+    for (int h = 0; h < g.totalHoles; h++) g.maxR = fmaxf(g.maxR, col[h*9 + 104]);
+    g.cellSize = fmaxf(2.0f*g.maxR + 0.5f, 2.0f);
+    g.originX = -colW/2.0f - g.cellSize;
+    g.originZ = -colH/2.0f - g.cellSize;
+    g.nx = (int)ceilf((colW + 2*g.cellSize) / g.cellSize) + 1;
+    g.nz = (int)ceilf((colH + 2*g.cellSize) / g.cellSize) + 1;
+    g.cnt.assign((size_t)g.nx * g.nz, 0);
+    for (int pass = 0; pass < 2; pass++) {               // pass 0 counts, pass 1 fills
+        if (pass == 1) {
+            g.maxPerCell = 1;
+            for (int c : g.cnt) g.maxPerCell = c > g.maxPerCell ? c : g.maxPerCell;
+            g.idx.assign((size_t)g.nx * g.nz * g.maxPerCell, 0);
+            std::fill(g.cnt.begin(), g.cnt.end(), 0);
+        }
+        for (int h = 0; h < g.totalHoles; h++) {
+            float hx = col[h*9+100], hz = col[h*9+103], hr = col[h*9+104];
+            int cx0 = (int)floorf((hx-hr-g.originX)/g.cellSize), cx1 = (int)floorf((hx+hr-g.originX)/g.cellSize);
+            int cz0 = (int)floorf((hz-hr-g.originZ)/g.cellSize), cz1 = (int)floorf((hz+hr-g.originZ)/g.cellSize);
+            for (int cx = cx0; cx <= cx1; cx++)
+                for (int cz = cz0; cz <= cz1; cz++) {
+                    if (cx < 0 || cx >= g.nx || cz < 0 || cz >= g.nz) continue;
+                    int cid = cx*g.nz + cz;
+                    if (pass == 1) g.idx[(size_t)cid*g.maxPerCell + g.cnt[cid]] = h;
+                    g.cnt[cid]++;
+                }
+        }
+    }
+    return g;
+}
+
+// ============================================================================
 // Main kernel
 // ============================================================================
 __global__ void photodetectorCudaMe(
@@ -373,6 +448,7 @@ __global__ void photodetectorCudaMe(
     float grid_cell,
     int grid_nx, int grid_nz,
     int grid_mpc,
+    float maxHoleR,
     long long numProjSingle,
     long long numImagebin)
 {
@@ -420,11 +496,11 @@ __global__ void photodetectorCudaMe(
         return;
     }
 
-    int numColLayers = (int)floorf(devCol[0] + 0.000001f);
+    int numColLayers = min((int)floorf(devCol[0] + 0.000001f), PE_MAX_LAYERS);
     int numDetBins = (int)floorf(devDet[0] + 0.000001f);
 
-    float colHalfX[10], colY1[10], colY2[10], colHalfZ[10], colThick[10], colCoeff[10];
-    int colNHoles[10];
+    float colHalfX[PE_MAX_LAYERS], colY1[PE_MAX_LAYERS], colY2[PE_MAX_LAYERS], colHalfZ[PE_MAX_LAYERS], colThick[PE_MAX_LAYERS], colCoeff[PE_MAX_LAYERS];
+    int colNHoles[PE_MAX_LAYERS];
     for (int m = 0; m < numColLayers; m++) {
         int b = (m+1)*10;
         colNHoles[m] = (int)devCol[b];
@@ -446,54 +522,55 @@ __global__ void photodetectorCudaMe(
     }
 
     // ======== PRE-COLLECT HOLES (spatial hash, deduplicated) ========
-    float colMidY = (colY1[0] + colY2[0]) / 2.0f;
-    float rayDY = yDC - yImage;
-    float t_to_col = (colMidY - yImage) / rayDY;
-    float xAtCol = xImage + (xDC - xImage) * t_to_col;
-    float zAtCol = zImage + (zDC - zImage) * t_to_col;
-
+    // At height y every ray from the voxel to a point of the crystal lies inside the lateral box spanned by
+    // the rays to the crystal's bounding sphere.  For each layer the box over the layer's thickness is
+    // searched, so no hole that a ray can cross is missed.  If more than PE_MAX_HOLES holes qualify, the
+    // sub-element loop falls back to all holes (slower, never wrong).
     float detDiag = sqrtf(wDet*wDet + hDet*hDet + tDet*tDet);
-    // FIXED: no division by distance. t_to_col is already dimensionless [0,1].
-    float maxLateral = detDiag * 0.5f * t_to_col + 2.0f;
-
-    int totalHoles = 0;
-    for (int m = 0; m < numColLayers; m++) totalHoles += colNHoles[m];
-    float maxHoleR = (totalHoles > 0) ? devCol[104] : 0.0f;
-    float searchR = maxLateral + maxHoleR;
-
-    int cx_min = max(0, (int)floorf((xAtCol - searchR - grid_ox) / grid_cell));
-    int cx_max = min(grid_nx-1, (int)floorf((xAtCol + searchR - grid_ox) / grid_cell));
-    int cz_min = max(0, (int)floorf((zAtCol - searchR - grid_oz) / grid_cell));
-    int cz_max = min(grid_nz-1, (int)floorf((zAtCol + searchR - grid_oz) / grid_cell));
-
-    const int MAX_HOLES = 32;
-    int holeIds[MAX_HOLES];
-    int holeLayers[MAX_HOLES];
+    float detR = 0.5f * detDiag;
+    int holeIds[PE_MAX_HOLES];
+    int holeLayers[PE_MAX_HOLES];
     int nHoles = 0;
-
-    for (int gx = cx_min; gx <= cx_max; gx++) {
-        for (int gz = cz_min; gz <= cz_max; gz++) {
-            int cid = gx * grid_nz + gz;
-            int cnt = gridCnt[cid];
-            int base = cid * grid_mpc;
-            for (int h = 0; h < cnt && nHoles < MAX_HOLES; h++) {
-                int hid = gridIdx[base + h];
-                bool dup = false;
-                for (int k = 0; k < nHoles; k++) {
-                    if (holeIds[k] == hid) { dup = true; break; }
+    bool holeOverflow = false;
+    int totalHoles = 0;
+    for (int m = 0, h0 = 0; m < numColLayers && !holeOverflow; h0 += colNHoles[m], m++) {
+        totalHoles += colNHoles[m];
+        if (colNHoles[m] <= 0) continue;
+        float bx0 = 1e30f, bx1 = -1e30f, bz0 = 1e30f, bz1 = -1e30f;
+        for (int a = 0; a < 2; a++) {                       // front / back face of the layer
+            float yP = a ? colY2[m] : colY1[m];
+            for (int b = 0; b < 2; b++) {                   // nearest / farthest y of the crystal
+                float tt = (yP - yImage) / fmaxf(yDC + (b ? detR : -detR) - yImage, 1e-3f);
+                for (int c = 0; c < 2; c++) {               // lateral extremes of the crystal
+                    float xP = xImage + (xDC + (c ? detR : -detR) - xImage) * tt;
+                    float zP = zImage + (zDC + (c ? detR : -detR) - zImage) * tt;
+                    bx0 = fminf(bx0, xP); bx1 = fmaxf(bx1, xP);
+                    bz0 = fminf(bz0, zP); bz1 = fmaxf(bz1, zP);
                 }
-                if (dup) continue;
-                float hx = devCol[hid*9+100];
-                float hz = devCol[hid*9+103];
-                float dx = xAtCol - hx, dz = zAtCol - hz;
-                if (dx*dx + dz*dz <= searchR*searchR) {
-                    int layer = 0, offset = hid;
-                    for (int m = 0; m < numColLayers; m++) {
-                        if (offset < colNHoles[m]) { layer = m; break; }
-                        offset -= colNHoles[m];
+            }
+        }
+        int cx_min = max(0, (int)floorf((bx0 - grid_ox) / grid_cell));
+        int cx_max = min(grid_nx-1, (int)floorf((bx1 - grid_ox) / grid_cell));
+        int cz_min = max(0, (int)floorf((bz0 - grid_oz) / grid_cell));
+        int cz_max = min(grid_nz-1, (int)floorf((bz1 - grid_oz) / grid_cell));
+        for (int gx = cx_min; gx <= cx_max && !holeOverflow; gx++) {
+            for (int gz = cz_min; gz <= cz_max && !holeOverflow; gz++) {
+                int cid = gx * grid_nz + gz;
+                int cnt = gridCnt[cid];
+                int base = cid * grid_mpc;
+                for (int h = 0; h < cnt; h++) {
+                    int hid = gridIdx[base + h];
+                    if (hid < h0 || hid >= h0 + colNHoles[m]) continue;          // other layer
+                    float hx = devCol[hid*9+100], hz = devCol[hid*9+103], hr = devCol[hid*9+104];
+                    if (hx + hr < bx0 || hx - hr > bx1 || hz + hr < bz0 || hz - hr > bz1) continue;
+                    bool dup = false;
+                    for (int k = 0; k < nHoles; k++) {
+                        if (holeIds[k] == hid) { dup = true; break; }
                     }
+                    if (dup) continue;
+                    if (nHoles == PE_MAX_HOLES) { holeOverflow = true; break; }
                     holeIds[nHoles] = hid;
-                    holeLayers[nHoles] = layer;
+                    holeLayers[nHoles] = m;
                     nHoles++;
                 }
             }
@@ -501,28 +578,21 @@ __global__ void photodetectorCudaMe(
     }
 
     // ======== PRE-COLLECT CROSS-DETECTORS ========
+    // crystals whose bounding cone overlaps the cone voxel -> this crystal; beyond PE_MAX_CROSS_DET the
+    // sub-element loop tests all crystals (slower, never wrong)
     float dist_vd = sqrtf((xDC-xImage)*(xDC-xImage)+(yDC-yImage)*(yDC-yImage)+(zDC-zImage)*(zDC-zImage));
     float crit_self = detDiag / dist_vd / 2.0f;
     float xDir = (xDC-xImage)/dist_vd;
     float yDir = (yDC-yImage)/dist_vd;
     float zDir = (zDC-zImage)/dist_vd;
 
-    const int MAX_CROSS_DET = 64;
-    int crossDetIds[MAX_CROSS_DET];
+    int crossDetIds[PE_MAX_CROSS_DET];
     int nCrossDet = 0;
-
-    for (int id = 0; id < numDetBins; id++) {
-        if (id == (int)idxDet) continue;
-        float ow = devDet[12*id+4], ot = devDet[12*id+5], oh = devDet[12*id+6];
-        float oc = devDet[12*id+7];
-        if (oc <= 0.01f) continue;
-        float ox = devDet[12*id+1], oy = devDet[12*id+2]+fov2col, oz = devDet[12*id+3];
-        float od = sqrtf((xImage-ox)*(xImage-ox)+(yImage-oy)*(yImage-oy)+(zImage-oz)*(zImage-oz));
-        float crit_o = sqrtf(ow*ow+oh*oh+ot*ot) / od / 2.0f;
-        float dxo = (ox-xImage)/od, dyo = (oy-yImage)/od, dzo = (oz-zImage)/od;
-        float ad = sqrtf((dxo-xDir)*(dxo-xDir)+(dyo-yDir)*(dyo-yDir)+(dzo-zDir)*(dzo-zDir));
-        if (ad <= crit_o + crit_self && nCrossDet < MAX_CROSS_DET)
-            crossDetIds[nCrossDet++] = id;
+    bool crossOverflow = false;
+    for (int id = 0; id < numDetBins && !crossOverflow; id++) {
+        if (!peCrossCandidate(devDet, id, (int)idxDet, fov2col, xImage, yImage, zImage, xDir, yDir, zDir, crit_self)) continue;
+        if (nCrossDet == PE_MAX_CROSS_DET) { crossOverflow = true; break; }
+        crossDetIds[nCrossDet++] = id;
     }
 
     // ======== SUBELEMENT LOOP ========
@@ -585,14 +655,19 @@ __global__ void photodetectorCudaMe(
                 if (blocked) continue;
 
                 // Holes — from pre-collected deduplicated list
-                float holeLen[10];
+                float holeLen[PE_MAX_LAYERS];
                 for (int m = 0; m < numColLayers; m++) holeLen[m] = 0.0f;
-                for (int ii = 0; ii < nHoles; ii++) {
-                    int hid = holeIds[ii];
+                int nScan = holeOverflow ? totalHoles : nHoles;
+                for (int ii = 0, layerEnd = numColLayers > 0 ? colNHoles[0] : 0, layer = 0; ii < nScan; ii++) {
+                    int hid = ii, hl;
+                    if (holeOverflow) {                     // all holes, layer by running count
+                        while (layer < numColLayers - 1 && hid >= layerEnd) layerEnd += colNHoles[++layer];
+                        hl = layer;
+                    } else { hid = holeIds[ii]; hl = holeLayers[ii]; }
                     float tmp = length_cylinder_ray(xImage, yImage, zImage, xDet, yDet, zDet,
                         devCol[hid*9+100], devCol[hid*9+101]+fov2col, devCol[hid*9+102]+fov2col,
                         devCol[hid*9+103], devCol[hid*9+104]);
-                    holeLen[holeLayers[ii]] += tmp;
+                    holeLen[hl] += tmp;
                     atten += devCol[hid*9+105] * tmp;
                 }
                 for (int m = 0; m < numColLayers; m++) {
@@ -604,8 +679,10 @@ __global__ void photodetectorCudaMe(
                 if (atten > 30.0f) continue;
 
                 // Other crystals — from pre-collected list
-                for (int ii = 0; ii < nCrossDet; ii++) {
-                    int oid = crossDetIds[ii];
+                for (int ii = 0; ii < (crossOverflow ? numDetBins : nCrossDet); ii++) {
+                    int oid = ii;
+                    if (!crossOverflow) oid = crossDetIds[ii];
+                    else if (!peCrossCandidate(devDet, oid, (int)idxDet, fov2col, xImage, yImage, zImage, xDir, yDir, zDir, crit_self)) continue;
                     float ox = devDet[12*oid+1], oy = devDet[12*oid+2]+fov2col, oz = devDet[12*oid+3];
                     float ow = devDet[12*oid+4], ot = devDet[12*oid+5], oh = devDet[12*oid+6];
                     float oc = devDet[12*oid+7], orot = devDet[12*oid+11];
@@ -649,7 +726,7 @@ __global__ void photodetectorCudaMe(
 int PESysMatGen(float* parameter_Collimator, float* parameter_Detector,
                 float* parameter_Image, float* dst, int cuda_id)
 {
-    cout << "Get into PESysMatGen (Optimized v3 — fixed maxLateral)" << endl;
+    cout << "Get into PESysMatGen (spatial hash of the holes, per-layer search)" << endl;
 
     int nVX = (int)parameter_Image[0];
     int nVY = (int)parameter_Image[1];
@@ -665,93 +742,53 @@ int PESysMatGen(float* parameter_Collimator, float* parameter_Detector,
         cudaGetDeviceProperties(&prop, d);
         printf("Device %d: %s (SM %d.%d)\n", d, prop.name, prop.major, prop.minor);
     }
-    cudaSetDevice(cuda_id);
+    if (cudaSetDevice(cuda_id) != cudaSuccess) { cerr << "cannot use CUDA device " << cuda_id << endl; return -1; }
 
     // ---- Build spatial hash ----
-    int nLayers = (int)floorf(parameter_Collimator[0] + 0.001f);
-    int totalHoles = 0;
-    for (int l = 0; l < nLayers; l++)
-        totalHoles += (int)parameter_Collimator[(l+1)*10];
-
-    float colW = parameter_Collimator[11];
-    float colH = parameter_Collimator[13];
-    float maxR = 0.0f;
-    for (int h = 0; h < totalHoles; h++) {
-        float r = parameter_Collimator[h*9 + 104];
-        if (r > maxR) maxR = r;
-    }
-
-    float cellSize = fmaxf(2.0f*maxR + 0.5f, 2.0f);
-    float originX = -colW/2.0f - cellSize;
-    float originZ = -colH/2.0f - cellSize;
-    int gridNX = (int)ceilf((colW + 2*cellSize) / cellSize) + 1;
-    int gridNZ = (int)ceilf((colH + 2*cellSize) / cellSize) + 1;
-    int maxPerCell = 16;
-
-    printf("Grid: %dx%d, cell=%.1fmm, holes=%d\n", gridNX, gridNZ, cellSize, totalHoles);
-
-    int gridSize = gridNX * gridNZ;
-    int* hIdx = new int[gridSize * maxPerCell]();
-    int* hCnt = new int[gridSize]();
-
-    for (int h = 0; h < totalHoles; h++) {
-        float hx = parameter_Collimator[h*9+100];
-        float hz = parameter_Collimator[h*9+103];
-        float hr = parameter_Collimator[h*9+104];
-        int cx0 = (int)floorf((hx-hr-originX)/cellSize);
-        int cx1 = (int)floorf((hx+hr-originX)/cellSize);
-        int cz0 = (int)floorf((hz-hr-originZ)/cellSize);
-        int cz1 = (int)floorf((hz+hr-originZ)/cellSize);
-        for (int cx = cx0; cx <= cx1; cx++)
-            for (int cz = cz0; cz <= cz1; cz++) {
-                if (cx<0||cx>=gridNX||cz<0||cz>=gridNZ) continue;
-                int cid = cx*gridNZ + cz;
-                int c = hCnt[cid];
-                if (c < maxPerCell) { hIdx[cid*maxPerCell+c] = h; hCnt[cid] = c+1; }
-            }
-    }
+    PEHoleHash g = pe_buildHoleHash(parameter_Collimator);
+    printf("Grid: %dx%d, cell=%.1fmm, holes=%d, max %d holes per cell\n", g.nx, g.nz, g.cellSize, g.totalHoles, g.maxPerCell);
+    int gridSize = g.nx * g.nz;
 
     // ---- GPU alloc ----
     size_t matBytes = sizeof(float) * numProjSingle * numImagebin;
-    float *devMat, *devCol, *devDet, *devImg;
-    int *d_gIdx, *d_gCnt;
+    float *devMat = 0, *devCol = 0, *devDet = 0, *devImg = 0;
+    int *d_gIdx = 0, *d_gCnt = 0;
+    int ret = -1;
+    cudaError_t err;
+#define PE_CHECK(call) do { err = (call); if (err != cudaSuccess) { cerr << "CUDA error in " #call ": " << cudaGetErrorString(err) << endl; goto cleanup; } } while (0)
+    {
+        PE_CHECK(cudaMalloc(&devMat, matBytes));
+        PE_CHECK(cudaMemset(devMat, 0, matBytes));
+        PE_CHECK(cudaMalloc(&devCol, 80000*sizeof(float)));
+        PE_CHECK(cudaMemcpy(devCol, parameter_Collimator, 80000*sizeof(float), cudaMemcpyHostToDevice));
+        PE_CHECK(cudaMalloc(&devDet, 80000*sizeof(float)));
+        PE_CHECK(cudaMemcpy(devDet, parameter_Detector, 80000*sizeof(float), cudaMemcpyHostToDevice));
+        PE_CHECK(cudaMalloc(&devImg, 100*sizeof(float)));
+        PE_CHECK(cudaMemcpy(devImg, parameter_Image, 100*sizeof(float), cudaMemcpyHostToDevice));
+        PE_CHECK(cudaMalloc(&d_gIdx, sizeof(int)*g.idx.size()));
+        PE_CHECK(cudaMemcpy(d_gIdx, g.idx.data(), sizeof(int)*g.idx.size(), cudaMemcpyHostToDevice));
+        PE_CHECK(cudaMalloc(&d_gCnt, sizeof(int)*gridSize));
+        PE_CHECK(cudaMemcpy(d_gCnt, g.cnt.data(), sizeof(int)*gridSize, cudaMemcpyHostToDevice));
 
-    cudaMalloc(&devMat, matBytes);
-    cudaMemset(devMat, 0, matBytes);
-    cudaMalloc(&devCol, 80000*sizeof(float));
-    cudaMemcpy(devCol, parameter_Collimator, 80000*sizeof(float), cudaMemcpyHostToDevice);
-    cudaMalloc(&devDet, 80000*sizeof(float));
-    cudaMemcpy(devDet, parameter_Detector, 80000*sizeof(float), cudaMemcpyHostToDevice);
-    cudaMalloc(&devImg, 100*sizeof(float));
-    cudaMemcpy(devImg, parameter_Image, 100*sizeof(float), cudaMemcpyHostToDevice);
-    cudaMalloc(&d_gIdx, sizeof(int)*gridSize*maxPerCell);
-    cudaMemcpy(d_gIdx, hIdx, sizeof(int)*gridSize*maxPerCell, cudaMemcpyHostToDevice);
-    cudaMalloc(&d_gCnt, sizeof(int)*gridSize);
-    cudaMemcpy(d_gCnt, hCnt, sizeof(int)*gridSize, cudaMemcpyHostToDevice);
+        long long total = (long long)numProjSingle * (long long)numImagebin;
+        int tpb = 256;
+        long long nBlk = (total + tpb - 1) / tpb;
+        if (nBlk > 2147483647LL) { cerr << "Grid overflow" << endl; goto cleanup; }
 
-    long long total = (long long)numProjSingle * (long long)numImagebin;
-    int tpb = 256;
-    long long nBlk = (total + tpb - 1) / tpb;
-    if (nBlk > 2147483647LL) { cerr << "Grid overflow" << endl; return -1; }
-
-    printf("Launch: %lld threads\n", total);
-
-    photodetectorCudaMe<<<(int)nBlk, tpb>>>(
-        devMat, devCol, devDet, devImg,
-        d_gIdx, d_gCnt,
-        originX, originZ, cellSize, gridNX, gridNZ, maxPerCell,
-        (long long)numProjSingle, (long long)numImagebin);
-
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) { cerr << "Launch: " << cudaGetErrorString(err) << endl; return -1; }
-    cudaDeviceSynchronize();
-    err = cudaGetLastError();
-    if (err != cudaSuccess) { cerr << "Exec: " << cudaGetErrorString(err) << endl; return -1; }
-
-    cudaMemcpy(dst, devMat, matBytes, cudaMemcpyDeviceToHost);
+        printf("Launch: %lld threads\n", total);
+        photodetectorCudaMe<<<(int)nBlk, tpb>>>(
+            devMat, devCol, devDet, devImg,
+            d_gIdx, d_gCnt,
+            g.originX, g.originZ, g.cellSize, g.nx, g.nz, g.maxPerCell, g.maxR,
+            (long long)numProjSingle, (long long)numImagebin);
+        PE_CHECK(cudaGetLastError());
+        PE_CHECK(cudaDeviceSynchronize());
+        PE_CHECK(cudaMemcpy(dst, devMat, matBytes, cudaMemcpyDeviceToHost));
+        ret = (int)numImagebin;
+    }
+cleanup:
+#undef PE_CHECK
     cudaFree(devCol); cudaFree(devDet); cudaFree(devImg);
     cudaFree(devMat); cudaFree(d_gIdx); cudaFree(d_gCnt);
-    delete[] hIdx; delete[] hCnt;
-
-    return (int)numImagebin;
+    return ret;
 }

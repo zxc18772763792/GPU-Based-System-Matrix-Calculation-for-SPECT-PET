@@ -1,6 +1,12 @@
-export PATH="/usr/local/cuda-12.6/bin":$PATH
-export LD_LIBRARY_PATH="/usr/local/cuda-12.6/lib64":$LD_LIBRARY_PATH
-export LIBRARY_PATH="/usr/local/cuda-12.6/lib64":$LIBRARY_PATH
-nvcc -c  scatter.cu
-nvcc -c  ScatterGen_Collimator.cpp
-g++ -o ScatterGen_Collimator scatter.o ScatterGen_Collimator.o -lcudart -L/usr/local/cuda-12.6
+#!/bin/sh
+# build ScatterGen_Collimator:  ./bd   (CUDA_HOME=/path/to/cuda ./bd for another CUDA installation)
+set -e
+cd "$(dirname "$0")"
+CUDA_HOME=${CUDA_HOME:-/usr/local/cuda-12.6}
+export PATH="$CUDA_HOME/bin:$PATH"
+export LD_LIBRARY_PATH="$CUDA_HOME/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LIBRARY_PATH="$CUDA_HOME/lib64${LIBRARY_PATH:+:$LIBRARY_PATH}"
+
+nvcc -c scatter.cu
+nvcc -c ScatterGen_Collimator.cpp
+g++ -o ScatterGen_Collimator scatter.o ScatterGen_Collimator.o -L"$CUDA_HOME/lib64" -lcudart
