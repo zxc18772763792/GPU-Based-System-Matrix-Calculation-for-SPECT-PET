@@ -6,7 +6,7 @@
 //   Fixed for integer overflow with large detector*voxel counts.
 //
 // Usage:
-//   ./PE_SysMat_Gen -cuda <cuda_device_id>
+//   ./PEGen_CircularHole -cuda <cuda_device_id>   (reads Params_*.dat in the working directory)
  
 #include <fstream> 
 #include <stdio.h>  
@@ -22,6 +22,16 @@
  
 #include "PESysMatGen.h"
 using namespace std;
+
+// Read up to n floats of a parameter file; exits with a message if the file is missing.
+static void readParams(const char* name, float* dst, size_t n)
+{
+	FILE* f = fopen(name, "rb");
+	if (!f) { cerr << "error: cannot open " << name << endl; exit(EXIT_FAILURE); }
+	size_t got = fread(dst, sizeof(float), n, f);
+	fclose(f);
+	if (got == 0) { cerr << "error: " << name << " is empty" << endl; exit(EXIT_FAILURE); }
+}
  
 int main(int argc, char* argv[])
 {
@@ -30,25 +40,22 @@ int main(int argc, char* argv[])
 	float* parameter_Image = new float[100]();
 	float* parameter_Physics = new float[100]();
  
-	FILE* fid;
-	fid = fopen("Params_Collimator.dat", "rb");
-	fread(parameter_Collimator, sizeof(float), 80000, fid);
-	fclose(fid);
- 
-	FILE* fid1;
-	fid1 = fopen("Params_Detector.dat", "rb");
-	fread(parameter_Detector, sizeof(float), 80000, fid1);
-	fclose(fid1);
- 
-	FILE* fid2;
-	fid2 = fopen("Params_Image.dat", "rb");
-	fread(parameter_Image, sizeof(float), 100, fid2);
-	fclose(fid2);
- 
-	FILE* fid3;
-	fid3 = fopen("Params_Physics.dat", "rb");
-	fread(parameter_Physics, sizeof(float), 100, fid3);
-	fclose(fid3);
+	readParams("Params_Collimator.dat", parameter_Collimator, 80000);
+	readParams("Params_Detector.dat", parameter_Detector, 80000);
+	readParams("Params_Image.dat", parameter_Image, 100);
+	readParams("Params_Physics.dat", parameter_Physics, 100);
+
+	// the parameter files are read into 80000 floats: at most 9 collimator layers, holes up to index 79999,
+	// crystals up to index 79999
+	{
+		int nLayers = (int)floor(parameter_Collimator[0] + 0.001f);
+		long long nHoles = 0;
+		for (int l = 0; l < nLayers && l < 9; l++) nHoles += (long long)floor(parameter_Collimator[(l + 1) * 10] + 0.001f);
+		long long nDet = (long long)floor(parameter_Detector[0] + 0.001f);
+		if (nLayers < 0 || nLayers > 9) { cerr << "error: " << nLayers << " collimator layers (at most 9)" << endl; return EXIT_FAILURE; }
+		if (100 + 9 * nHoles > 80000) { cerr << "error: " << nHoles << " holes do not fit in Params_Collimator (at most 8877)" << endl; return EXIT_FAILURE; }
+		if (12 * nDet + 1 > 80000) { cerr << "error: " << nDet << " crystals do not fit in Params_Detector (at most 6666)" << endl; return EXIT_FAILURE; }
+	}
  
 	////////////////////////////////////////////////////
 	
@@ -131,6 +138,7 @@ int main(int argc, char* argv[])
 		int q = PESysMatGen(parameter_Collimator, parameter_Detector, parameter_Image, 
 		                     out + idxRotation * numProjectionSingle * numImagebin, cuda_id);
  
+		if (q < 0) { cerr << "error: PE system matrix calculation failed (rotation " << idxRotation << "), nothing written" << endl; delete[] out; return EXIT_FAILURE; }
 		printf("numImagebin = %d\n", q);
 	}
  
@@ -138,9 +146,10 @@ int main(int argc, char* argv[])
 	sprintf(Fname, "PE_SysMat_shift_%f_%f_%f_v3.sysmat", shiftFOVX, shiftFOVY, shiftFOVZ);
 	FILE* fp1;
 	fp1 = fopen(Fname, "wb+");
-	if (fp1 == 0) { puts("error"); exit(0); }
-	fwrite(out, sizeof(float), totalElements, fp1);
+	if (fp1 == 0) { cerr << "error: cannot write " << Fname << endl; delete[] out; return EXIT_FAILURE; }
+	size_t written = fwrite(out, sizeof(float), totalElements, fp1);
 	fclose(fp1);
+	if (written != totalElements) { cerr << "error: writing " << Fname << " failed (disk full?)" << endl; delete[] out; return EXIT_FAILURE; }
  
 	delete[] out;
  

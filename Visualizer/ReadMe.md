@@ -16,14 +16,16 @@ python3 Visualizer/serve.py --data /path/to/run_dir          # 仅需 Python 标
 ```
 
 `serve.py` 默认只监听 127.0.0.1，通过 HTTP Range 和 `/api/strided` 按需读取文件，
-GB 级系统矩阵不会整体载入内存；数据目录根下的参数文件、MC 输出会自动加载。
+GB 级系统矩阵不会整体载入内存；数据目录根下的参数文件、MC 输出会自动加载（子目录中的文件列在左侧，
+点击加载）。只接受 Host 为 127.0.0.1 / localhost / [::1] 的请求（防止 DNS rebinding）。
+注意：同一台服务器上的其他用户也能连接 127.0.0.1 的端口，数据需保密时不要在多用户机器上运行。
 
 ## 可加载的文件
 
 | 文件 | 用途 |
 |---|---|
-| `Params_Collimator.dat`, `Params_Detector.dat`, `Params_Image.dat`, `Params_Physics.dat` | 几何元素（也接受 `Param_*.dat`） |
-| `*.sysmat` | 解析或 MC 系统矩阵 `[rotation][detector][voxel]`，大小与几何不符时会报错 |
+| `Params_Collimator.dat`, `Params_Detector.dat`, `Params_Image.dat`, `Params_Physics.dat` | 几何元素（也接受 `Param_*.dat`；名称需完全一致，打开文件夹时只取最上层的） |
+| `*.sysmat` | 解析或 MC 系统矩阵 `[rotation][detector][voxel]`，大小与几何不符时会报错；MC 分段计算的 `*_rotB-E_*.sysmat` 只含旋转 B…E−1，按真实旋转编号显示；`*_relerr.sysmat`（相对误差）不作为矩阵加载 |
 | `*_spectrum.csv`, `*_tracks.json`, `*_summary.json` | `MCGen_MultiGPU` 的能谱、光子径迹与运行摘要 |
 
 ## 功能
@@ -69,7 +71,8 @@ GB 级系统矩阵不会整体载入内存；数据目录根下的参数文件�
 | numpy | ix | iy 向下 | `imshow(row.reshape(nZ, nY, nX)[iz])` |
 | MATLAB | iy | ix 向下 | `imagesc(reshape(row, nX, nY, nZ)(:,:,iz))` |
 
-图中白色箭头指向当前旋转位置下探测器 (+y) 所在方向（随旋转位置在图像中顺时针转动），左下/左上角标出体素 (0,0)。
+图中白色箭头指向当前旋转位置下探测器 (+y) 所在方向（随旋转位置转动：物理与 MATLAB 模式中为顺时针，
+numpy 模式中 y 轴向下，为逆时针），左下/左上角标出体素 (0,0)。
 
 ## 文件结构
 

@@ -49,7 +49,16 @@ int main(int argc, char** argv) {
     int nVX = (int)floor(img[0] + 0.001f), nVY = (int)floor(img[1] + 0.001f), nVZ = (int)floor(img[2] + 0.001f);
     int nP = (int)floor(det[0] + 0.0001f), nI = nVX * nVY * nVZ;
     int nRot = (int)floor(img[6] + 0.001f);
-    int nHoles0 = (int)floor(col[10] + 0.01f);          // the legacy kernels use the holes of layer 0
+    int nHoles0 = legacyTotalHoles(col.data());         // the legacy collimator kernel uses the holes of all layers
+    {   // same limits as the GPU programs (80000-float parameter buffers)
+        int nL = (int)floor(col[0] + 0.001f);
+        long long nH = 0;
+        for (int l = 0; l < nL && l < 9; ++l) nH += (long long)floor(col[(l + 1) * 10] + 0.001f);
+        if (nL < 0 || nL > 9 || 100 + 9 * nH > 80000 || 12LL * nP + 1 > 80000) {
+            fprintf(stderr, "error: %d layers / %lld holes / %d crystals exceed the parameter format (9 / 8877 / 6666)\n", nL, nH, nP);
+            return 1;
+        }
+    }
     size_t perRot = (size_t)nP * nI;
     auto pe = cpu::readFloats(pos[1], perRot * nRot, true);
     auto t0 = std::chrono::steady_clock::now();
@@ -103,7 +112,7 @@ int main(int argc, char** argv) {
             threadIdx.x = threadIdx.y = threadIdx.z = 0;
             for (int v = 0; v < nI; ++v)
                 for (int s = 0; s < nP; ++s) {
-                    blockIdx.x = (unsigned)row; blockIdx.y = (unsigned)v; blockIdx.z = (unsigned)s;
+                    blockIdx.y = (unsigned)row; blockIdx.x = (unsigned)v; blockIdx.z = (unsigned)s;
                     if (model == 2) crystalScatterV2(dX, col.data(), xi.data(), det.data(), img.data(), phy.data(), peR, bitC.data(), layers, hash, nb.data(), nP, nI, peMin);
                     else crystalScatterSysMatCuda(dX, det.data(), img.data(), phy.data(), peR, bitC.data(), nP, nI);
                 }
@@ -115,18 +124,18 @@ int main(int argc, char** argv) {
             for (int v = 0; v < nI; ++v) {
                 if (model == 2) {
                     for (int h = hole0; h < (skipShell ? 0 : std::min(hole1, layers.totalHoles)); ++h) {
-                        blockIdx.x = (unsigned)row; blockIdx.y = (unsigned)v; blockIdx.z = (unsigned)h;
+                        blockIdx.y = (unsigned)row; blockIdx.x = (unsigned)v; blockIdx.z = (unsigned)h;
                         collimatorScatterShellV2(dC, col.data(), xi.data(), det.data(), img.data(), phy.data(), layers, hash,
                                                  nb.data(), nP, nI, 0, layers.totalHoles);
                     }
                     for (int m = 0; m < (skipBulk ? 0 : layers.n); ++m) {
-                        blockIdx.x = (unsigned)row; blockIdx.y = (unsigned)v; blockIdx.z = (unsigned)m;
+                        blockIdx.y = (unsigned)row; blockIdx.x = (unsigned)v; blockIdx.z = (unsigned)m;
                         collimatorScatterBulkV2(dC, col.data(), xi.data(), det.data(), img.data(), phy.data(), layers, hash,
                                                 nb.data(), nP, nI);
                     }
                 } else {
                     for (int h = 0; h < nHoles0; ++h) {
-                        blockIdx.x = (unsigned)row; blockIdx.y = (unsigned)v; blockIdx.z = (unsigned)h;
+                        blockIdx.y = (unsigned)row; blockIdx.x = (unsigned)v; blockIdx.z = (unsigned)h;
                         collimatorScatterSysMatCuda(dC, col.data(), det.data(), img.data(), phy.data(), bitH.data(), nP, nI);
                     }
                 }

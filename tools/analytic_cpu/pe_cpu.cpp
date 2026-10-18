@@ -1,5 +1,5 @@
 // CPU run of the ORIGINAL PEGen_RayTracing_CircularHole kernel (photodetectorCudaMe).
-// The host part of PESysMatGen() (spatial hash of the holes) is replicated 1:1, then every
+// The host part of PESysMatGen() (spatial hash of the holes, pe_buildHoleHash) is shared, then every
 // CUDA thread of the launch is executed on the CPU.  Built by build.py.
 //
 //   pe_cpu <params_dir> [output.sysmat]
@@ -17,28 +17,8 @@ int main(int argc, char** argv) {
     long long nP = (long long)floorf(det[0] + 0.0001f), nI = (long long)nVX * nVY * nVZ;
     int nRot = (int)floor(img[6] + 0.001);
 
-    // ---- spatial hash, identical to PESysMatGen()
-    int nLayers = (int)floorf(col[0] + 0.001f), totalHoles = 0;
-    for (int l = 0; l < nLayers; l++) totalHoles += (int)col[(l + 1) * 10];
-    float colW = col[11], colH = col[13], maxR = 0.0f;
-    for (int h = 0; h < totalHoles; h++) maxR = std::max(maxR, col[h * 9 + 104]);
-    float cellSize = fmaxf(2.0f * maxR + 0.5f, 2.0f);
-    float originX = -colW / 2.0f - cellSize, originZ = -colH / 2.0f - cellSize;
-    int gridNX = (int)ceilf((colW + 2 * cellSize) / cellSize) + 1;
-    int gridNZ = (int)ceilf((colH + 2 * cellSize) / cellSize) + 1;
-    int maxPerCell = 16;
-    std::vector<int> hIdx(gridNX * gridNZ * maxPerCell, 0), hCnt(gridNX * gridNZ, 0);
-    for (int h = 0; h < totalHoles; h++) {
-        float hx = col[h * 9 + 100], hz = col[h * 9 + 103], hr = col[h * 9 + 104];
-        int cx0 = (int)floorf((hx - hr - originX) / cellSize), cx1 = (int)floorf((hx + hr - originX) / cellSize);
-        int cz0 = (int)floorf((hz - hr - originZ) / cellSize), cz1 = (int)floorf((hz + hr - originZ) / cellSize);
-        for (int cx = cx0; cx <= cx1; cx++)
-            for (int cz = cz0; cz <= cz1; cz++) {
-                if (cx < 0 || cx >= gridNX || cz < 0 || cz >= gridNZ) continue;
-                int cid = cx * gridNZ + cz, c = hCnt[cid];
-                if (c < maxPerCell) { hIdx[cid * maxPerCell + c] = h; hCnt[cid] = c + 1; }
-            }
-    }
+    // ---- spatial hash: the same function as PESysMatGen()
+    PEHoleHash g = pe_buildHoleHash(col.data());
 
     std::vector<float> out((size_t)nRot * nP * nI, 0.0f);
     const long long total = nP * nI, chunk = 256;
@@ -48,8 +28,8 @@ int main(int argc, char** argv) {
         cpu::parallelFor((total + chunk - 1) / chunk, [&](long long c) {
             for (long long tid = c * chunk; tid < std::min(total, (c + 1) * chunk); ++tid) {
                 blockIdx.x = (unsigned)tid; threadIdx.x = 0;
-                photodetectorCudaMe(dst, col.data(), det.data(), img.data(), hIdx.data(), hCnt.data(),
-                                    originX, originZ, cellSize, gridNX, gridNZ, maxPerCell, nP, nI);
+                photodetectorCudaMe(dst, col.data(), det.data(), img.data(), g.idx.data(), g.cnt.data(),
+                                    g.originX, g.originZ, g.cellSize, g.nx, g.nz, g.maxPerCell, g.maxR, nP, nI);
             }
         });
     }

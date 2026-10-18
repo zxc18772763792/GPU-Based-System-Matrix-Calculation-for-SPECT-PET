@@ -18,3 +18,17 @@ ScatterGen_*/ScatterGen_Crystal
 __pycache__/
 tools/analytic_cpu/build/
 examples/analytic_vs_mc/run_*/
+
+# run outputs (system matrices can be many GB)
+*.sysmat
+GeometryRelationShip_Crystal2Crystal
+GeometryRelationShip_Collimator2Crystal
+demo_*/
+demo_params/
+*_spectrum.csv
+*_summary.json
+*_tracks.json
+# Visualizer browser tests (npm i -D playwright)
+node_modules/
+package.json
+package-lock.json

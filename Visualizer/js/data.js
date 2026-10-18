@@ -58,12 +58,11 @@
   SV.classify = function (name) {
     const n = name.toLowerCase();
     if (n.endsWith('.dat')) {
-      if (n.includes('collimator')) return 'col';
-      if (n.includes('detector')) return 'det';
-      if (n.includes('image')) return 'img';
-      if (n.includes('physics')) return 'phy';
-      return null;
+      // only the four parameter files (Params_Collimator.dat, ...), not other .dat files of a run
+      const m = /^params?_(collimator|detector|image|physics)\.dat$/.exec(n.split('/').pop());
+      return m ? { collimator: 'col', detector: 'det', image: 'img', physics: 'phy' }[m[1]] : null;
     }
+    if (n.endsWith('_relerr.sysmat')) return 'relerr';    // relative statistical errors of an MC matrix, not a matrix
     if (n.endsWith('.sysmat')) return 'sysmat';
     if (n.endsWith('_spectrum.csv')) return 'spectrum';
     if (n.endsWith('_tracks.json')) return 'tracks';

@@ -61,7 +61,7 @@
     // ---------------------------------------------------------------- detector
     if (det) {
       const n = Math.floor(det[0] + 0.001);
-      if (12 * n + 13 > det.length) issues.push({ level: 'error', key: 'chkDetFile', args: [n, det.length] });
+      if (12 * n + 1 > det.length) issues.push({ level: 'error', key: 'chkDetFile', args: [n, det.length] });
       for (let i = 0; i < n && 12 * i + 12 < det.length; i++) {
         const q = (k) => det[12 * i + k];
         m.crystals.push({
@@ -155,7 +155,7 @@
     // crystal overlaps: uniform grid on AABBs, then exact test in the x-z plane (separating axes)
     if (en.length) {
       const ext = en.map(SV.crystalExtent);
-      const cell = Math.max(0.5, Math.min(...en.map((c) => Math.max(c.w, c.t, c.h))));
+      const cell = Math.max(0.5, en.reduce((m, c) => Math.min(m, Math.max(c.w, c.t, c.h)), Infinity));   // no spread: > 1e5 crystals
       const grid = new Map();
       en.forEach((c, i) => {
         const e = ext[i];

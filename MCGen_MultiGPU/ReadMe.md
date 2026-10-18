@@ -44,6 +44,7 @@ make cpu                   # -> MCGen_CPU      (无需 CUDA，只有 CPU 后端)
 ## 快速开始
 
 ```bash
+# 在 MCGen_MultiGPU/ 目录下执行
 # 1) 生成一个示例几何 (钨多针孔 + NaI 像素阵列)，或使用你自己的 Params_*.dat
 python3 ../tools/make_demo_params.py --out demo_tc99m
 cd demo_tc99m
@@ -52,7 +53,7 @@ cd demo_tc99m
 ../MCGen_MultiGPU ../MC_Config_Tc99m.txt -gpus 0,1,2,3 -histories_per_voxel 1e6
 
 # 511 keV (LYSO) 示例
-python3 ../tools/make_demo_params.py --out demo_511 --energy 511 --crystal LYSO --thickness 10
+python3 ../../tools/make_demo_params.py --out ../demo_511 --energy 511 --crystal LYSO --thickness 10
 cd ../demo_511 && ../MCGen_MultiGPU ../MC_Config_511keV.txt
 
 # 3) 可视化：几何、系统矩阵、能谱、MC 光子径迹
@@ -71,10 +72,12 @@ python3 ../../Visualizer/serve.py --data .
   显示卡不会卡死，进度/ETA 每 5 s 输出一次。
 * **可复现**：每个光子历史使用独立的 Philox4x32-10 流，键为 `(seed)`、计数器为
   `(抽样序号, 历史号, 体素, 旋转)`。结果与 GPU 数量、块大小、线程数、启动拆分 **无关**
-  （CPU 后端 1 线程与 4 线程输出逐位相同）。
-* **多机扩展**：`rot_begin` / `rot_end` 只计算部分旋转，文件名自动加 `_rotB-E` 后缀，各机器结果
+  （CPU 后端 1 线程与 4 线程输出逐位相同；GPU 上浮点原子加法的顺序不固定，不同运行之间只在
+  float 舍入量级 (~1e-7 相对) 上不同）。
+* **多机扩展**：`rot_begin` / `rot_end`（左闭右开，即旋转 `rot_begin … rot_end-1`）只计算部分旋转，文件名自动加 `_rotB-E` 后缀，各机器结果
   按旋转顺序拼接 (`cat`) 即得完整矩阵，与单机计算完全一致。
-* 显存不足时自动减小块大小（仅受 `nTally × nDet × chunk × 4 B` 限制）。
+* 显存不足时自动减小块大小：每个块占用 `nTally × nDet × chunk × 12 B`（float 启动累加器 + double
+  块累加器；`save_relerr=1` 时再加一倍），块大小取不超过可用显存 60% 的值。
 
 ## 物理模型
 
@@ -94,9 +97,10 @@ python3 ../../Visualizer/serve.py --data .
 * **140.5 keV (Tc-99m)**：钨 μ ≈ 3.6 mm⁻¹，穿透小；准直器 K 荧光（W 58–69 keV、Pb 73–87 keV）
   主要落在低能窗；NaI 中碘 K 逃逸峰在 ≈112 keV，会影响 DEW/TEW 散射窗。示例配置同时输出光电峰窗
   与下散射窗两个矩阵。
-* **511 keV**：钨 μ ≈ 0.26 mm⁻¹，穿透与准直器散射显著；LYSO 中康普顿占 ~2/3。在示例几何
-  （10 mm 钨针孔板 + 10 mm LYSO）中，光电峰窗内 MC 灵敏度为 1.24e-3，而解析 PE 模型为 7.7e-4，
-  窗内约 30% 计数来自准直器散射 —— 这正是 MC 相对解析模型的主要价值。
+* **511 keV**：钨 μ ≈ 0.26 mm⁻¹，穿透与准直器散射显著；LYSO 中康普顿占 ~2/3。在
+  [`examples/analytic_vs_mc`](../examples/analytic_vs_mc/ReadMe.md) 的 511 keV 例子（10 mm 钨板、3×3 针孔，
+  10 mm LYSO）中，光电峰窗内 MC 总灵敏度是解析 PE 模型的 1.55 倍，窗内约 31% 计数来自准直器散射
+  —— 这正是 MC 相对解析模型的主要价值。
 * `yield`：输出默认是“每个发射光子”的探测概率；F-18 每次衰变可设 `yield = 1.934`。
 
 ## 方差缩减（无偏）
@@ -139,7 +143,7 @@ H 的孔列表只依赖 (体素, 旋转)，所以结果仍与 GPU 数量和任�
 | `crystal_material` | `params` | 晶体材料；`crystal_material_flagK` 按 Param_Detector[12]==K 覆盖 |
 | `density_<材料>` | 库中密度 | 密度覆盖 (g/cm³) |
 | `physics` | `full` | `primary_pe`：任何散射即终止、无荧光，复现解析 PE 模型（用于验证）；`single_scatter`：最多一次康普顿散射（第二次散射或瑞利散射即终止）、无荧光、只记光电吸收的能量，且不计在散射晶体本身中的再吸收 —— 与解析散射模型 v2 的一阶散射定义完全一致（用于验证 ScatterGen） |
-| `rayleigh`, `fluorescence` | 1, 1 | 开关 |
+| `rayleigh`, `fluorescence` | 1, 1 | 开关（`1/0`、`on/off`、`true/false`、`yes/no`；其它布尔键同） |
 | `energy_cutoff_keV` | 10 | 低于此能量就地沉积 |
 | `shield_outside_collimator` | `absorber` | `absorber` / `slab` / `none`，见上；`slab` 外框大小由 `shield_frame_margin_mm`（20）或 `shield_frame_halfwidth_mm` / `shield_frame_halfheight_mm` 指定 |
 | `histories_per_voxel` | 1e5 | 每体素历史数 |
@@ -150,15 +154,16 @@ H 的孔列表只依赖 (体素, 旋转)，所以结果仍与 GPU 数量和任�
 | `seed` | 20241221 | 随机数种子 |
 | `backend`, `gpus` | `gpu`, `all` | `cpu` 后端；GPU 列表如 `0,1,2,3` |
 | `cpu_threads`, `threads_per_voxel`, `voxel_chunk`, `launch_target_ms` | 自动 | 性能参数，不影响结果 |
-| `rot_begin`, `rot_end` | 全部 | 只计算部分旋转 |
+| `rot_begin`, `rot_end` | 0, 旋转数 | 只计算旋转 `rot_begin … rot_end-1`（左闭右开） |
 | `save_components` | 0 | 另存 原发 / 准直器散射 / 晶体间散射 三个分量矩阵 |
 | `save_relerr` | 0 | 每个矩阵元素的相对统计误差 |
 | `yield` | 1 | 结果乘以每次衰变的光子数 |
 | `spectrum_bins`, `spectrum_emax_keV` | 1024, 1.25·E0 | 能谱直方图 |
-| `trace_voxel`, `trace_histories`, `trace_rotation` | -1, 200, 0 | 记录某体素前 N 个历史的径迹（`-2` = 中心体素），供可视化 |
-| `output_dir`, `output_prefix` | `.`, 自动 | 输出位置与前缀 |
+| `trace_voxel`, `trace_histories`, `trace_rotation` | -1, 200, `rot_begin` | 记录某体素前 N 个历史的径迹（`-2` = 中心体素），供可视化 |
+| `trace_max_vertices` | 200000 | 径迹顶点数上限 |
+| `output_dir`, `output_prefix` | `.`, 自动 | 输出位置（不存在时自动创建）与前缀 |
 
-未知的键会给出警告。
+未知的键会给出警告；数值键必须是完整的数字（如 `1e6`，不接受 `1,000`），否则报错退出。
 
 ## 输出
 
@@ -168,7 +173,7 @@ H 的孔列表只依赖 (体素, 旋转)，所以结果仍与 GPU 数量和任�
 |---|---|
 | `_win<k>.sysmat` 或 `_win<k>_total.sysmat` | 能窗 k 的系统矩阵，float32 `[rotation][detector][voxel]`，单位：每发射光子的计数概率 |
 | `_win<k>_primary / _colscatter / _xtalscatter.sysmat` | 分量（`save_components=1`）：进入该晶体前未发生相互作用 / 曾在准直器中相互作用 / 曾在其它晶体中相互作用 |
-| `_win<k>_relerr.sysmat` | 相对统计误差（`save_relerr=1`） |
+| `_win<k>_relerr.sysmat` | 相对统计误差（`save_relerr=1`）；同时 `save_components=1` 时另有各分量自己的 `_win<k>_<分量>_relerr.sysmat` |
 | `_spectrum.csv` | 所有晶体的沉积能谱（原始与能量展宽后，按三类事件） |
 | `_tracks.json` | 径迹（可视化用） |
 | `_summary.json` | 运行信息、材料、平均灵敏度及各分量比例、设备吞吐 |
