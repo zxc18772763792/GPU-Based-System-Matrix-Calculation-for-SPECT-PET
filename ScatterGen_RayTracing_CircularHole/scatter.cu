@@ -2144,6 +2144,10 @@ __global__ void geometryRelationShip_Collimator2Crystal(unsigned int* dst_relati
 #ifndef S2_PE_REL
 #define S2_PE_REL 1e-7f       // crystal scatter: skip (j, v) with PE[j,v] < S2_PE_REL x max(PE)
 #endif
+#ifndef S2_TAU_SKIP
+#define S2_TAU_SKIP 30.0f     // skip cells (and whole patches) of a face whose attenuation exponent exceeds this:
+                              // transmission < e^-30 = 1e-13, far below float resolution of the sums
+#endif
 #define S2_MAXK 64            // crystals between scatter crystal and detector crystal kept per thread
 #define S2_MAXNB 24           // nearest crystals checked for shadowing of collimator scatter
 #define S2_MAXLAYERS 10
@@ -2317,6 +2321,8 @@ __device__ void s2layerParts(const float* col, const S2Col& L, const S2Hash& H, 
     float Ls = (t1 - t0) * s2len(d), Lh = 0.0f, tauHoles = 0.0f;
     if (L.nh[m] > 0) {
         float r = L.maxR;
+        // x-z projection of the clipped segment, for the cheap test of each hole axis below
+        float sx = q1.x - q0.x, sz = q1.z - q0.z, ss = sx * sx + sz * sz;
         int cx0 = max(0, (int)floorf((fminf(q0.x, q1.x) - r - H.ox) / H.cell));
         int cx1 = min(H.nx - 1, (int)floorf((fmaxf(q0.x, q1.x) + r - H.ox) / H.cell));
         int cz0 = max(0, (int)floorf((fminf(q0.z, q1.z) - r - H.oz) / H.cell));
@@ -2328,6 +2334,12 @@ __device__ void s2layerParts(const float* col, const S2Col& L, const S2Hash& H, 
                     int h = H.idx[cid * H.mpc + k];
                     if (h < L.h0[m] || h >= L.h0[m] + L.nh[m]) continue;
                     const float* hp = col + 100 + 9 * h;
+                    // the segment cannot enter a hole whose axis its x-z projection never comes within R of
+                    // (the intersection length would be exactly 0)
+                    float ax = q0.x - hp[0], az = q0.z - hp[3];
+                    float u = ss > 0.0f ? fminf(fmaxf(-(ax * sx + az * sz) / ss, 0.0f), 1.0f) : 0.0f;
+                    float ex = ax + u * sx, ez = az + u * sz, rr = hp[4] * 1.0001f + 1e-4f;
+                    if (ex * ex + ez * ez > rr * rr) continue;
                     // count every hole once: only in the cell that holds its centre
                     if ((int)floorf((hp[0] - H.ox) / H.cell) != cx || (int)floorf((hp[3] - H.oz) / H.cell) != cz) continue;
                     float l = s2segCylY(q0, q1, hp[0], hp[3], hp[1] + L.fov2col, hp[2] + L.fov2col, hp[4]);
@@ -2482,6 +2494,10 @@ __device__ float s2toCrystal(S2V p, S2V din, const S2Phys& P, const S2Box& I, S2
                     s2put(c, V, pv + hd * tanf(av0 + (av1 - av0) * (iv + 0.5f) / nv));
                     S2V cw = s2toWorld(I, c);
                     att.farParts(p, cw, tpe, tc, th);
+                    // scattered energies are <= E0 and both the photoelectric and the Klein-Nishina
+                    // coefficients grow as the energy drops, so tpe + tc + th bounds the exponent of
+                    // every cell of the patch from below: an opaque patch contributes nothing
+                    if (tpe + tc + th > S2_TAU_SKIP) continue;
                 }
                 float pu0 = s2cellEdge(eu0, eu1, au0, au1, iu * mu_, Nu, hd), pu1 = s2cellEdge(eu0, eu1, au0, au1, (iu + 1) * mu_, Nu, hd);
                 float pv0 = s2cellEdge(ev0, ev1, av0, av1, iv * mv_, Nv, hd), pv1 = s2cellEdge(ev0, ev1, av0, av1, (iv + 1) * mv_, Nv, hd);
@@ -2504,14 +2520,17 @@ __device__ float s2toCrystal(S2V p, S2V din, const S2Phys& P, const S2Box& I, S2
                         e = s2mul(e, 1.0f / s2len(e));
                         float ct = s2dot(dl, e);
                         float Es = P.E0 / (1.0f + P.a0 * (1.0f - ct));
-                        float w = edgeW ? s2cellWindow(pl, dl, q, P, U, V, pu + u0, pu + u1, pv + v0, pv + v1)
-                                        : s2window(Es, P.lo, P.hi, P.R0, P.E0);
-                        if (w < 1e-9f) continue;
                         float r = P.E0 / Es, r3 = r * r * r, rc = s2knTotal(Es / 511.0f) * P.knTot0Inv;
                         float mPE = muI.pe * r3, mT = mPE + muI.c * rc;
                         if (mT <= 0.0f) continue;
+                        float tauFar = tpe * r3 + tc * rc + th;
+                        if (tauFar > S2_TAU_SKIP) continue;              // opaque cell: skip window and chord
+                        float w = edgeW ? s2cellWindow(pl, dl, q, P, U, V, pu + u0, pu + u1, pv + v0, pv + v1)
+                                        : s2window(Es, P.lo, P.hi, P.R0, P.E0);
+                        if (w < 1e-9f) continue;
                         S2V qw = s2toWorld(I, q);
-                        float tau = tpe * r3 + tc * rc + th + att.nearTau(p, qw, r3, rc);
+                        float tau = tauFar + att.nearTau(p, qw, r3, rc);
+                        if (tau > S2_TAU_SKIP) continue;
                         sum += s2knShape(ct, P.a0) * P.knNorm * s2rectOmega(u0, u1, v0, v1, hd) * w * mPE / mT *
                                s2cellAbsorb(pl, q, e, I, A, U, V, pu + u0, pu + u1, pv + v0, pv + v1, mT) * expf(-tau);
                     }
