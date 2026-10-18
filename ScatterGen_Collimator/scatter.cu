@@ -1058,6 +1058,28 @@ __device__ int indexFrombitmap_collimator(int i, int j, int k, unsigned int* d_b
 }
 
 
+// Holes of all collimator layers, stored one layer after the other from index 100 on (layer 0 first).
+// The legacy collimator-scatter kernels use every hole with the coefficients of its own layer.
+__host__ __device__ inline int legacyTotalHoles(const float* col)
+{
+	int nLayers = (int)floor(col[0] + 0.001f);
+	int n = 0;
+	for (int m = 0; m < nLayers && m < 9; m++) n += (int)floor(col[(m + 1) * 10] + 0.001f);
+	return n;
+}
+
+__host__ __device__ inline int legacyHoleLayer(const float* col, int hole)
+{
+	int nLayers = (int)floor(col[0] + 0.001f);
+	int end = 0;
+	for (int m = 0; m < nLayers && m < 9; m++)
+	{
+		end += (int)floor(col[(m + 1) * 10] + 0.001f);
+		if (hole < end) return m;
+	}
+	return 0;
+}
+
 __global__ void collimatorScatterSysMatCuda(float* dst,
 	float* deviceparameter_Collimator,
 	float* deviceparameter_Detector,
@@ -1069,7 +1091,7 @@ __global__ void collimatorScatterSysMatCuda(float* dst,
 
 {
 
-	int numCollimator_Holes = (int)floor(deviceparameter_Collimator[10] + 0.000001f);
+	int numCollimator_Holes = legacyTotalHoles(deviceparameter_Collimator);   // all layers (was layer 0 only)
 	int numDetectorbins = numProjectionSingle;
 
 	float _float_FOV2Collimator = deviceparameter_Image[11];
@@ -1220,7 +1242,11 @@ __global__ void collimatorScatterSysMatCuda(float* dst,
 
 
 	float solid_angle = (virtual_r * virtual_r * M_PI + (deviceparameter_Collimator[id_CollimatorHole * 9 + 102] - deviceparameter_Collimator[id_CollimatorHole * 9 + 101]) * virtual_r) / (4.0f * M_PI * L_image_hole * L_image_hole) * fabs(y_scatter - yImage) / L_image_hole;
-	float prob_Compton_otherCollimatorHole = solid_angle / deviceparameter_Collimator[15] * deviceparameter_Collimator[17];
+	// Compton / total attenuation of the layer this hole belongs to (was always layer 0)
+	int layerOfHole = legacyHoleLayer(deviceparameter_Collimator, id_CollimatorHole);
+	float coeffLayerTotal = deviceparameter_Collimator[(layerOfHole + 1) * 10 + 5];
+	float coeffLayerCompton = deviceparameter_Collimator[(layerOfHole + 1) * 10 + 7];
+	float prob_Compton_otherCollimatorHole = coeffLayerTotal > 0.0f ? solid_angle / coeffLayerTotal * coeffLayerCompton : 0.0f;
 	float length = 0.0f;
 	//////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -1448,7 +1474,7 @@ __global__ void geometryRelationShip_Collimator2Crystal(unsigned int * dst_relat
 {
 	
 	int numProjectionSingle = deviceparameter_Detector[0];
-	int numCollimatorHoles = deviceparameter_Collimator[10];
+	int numCollimatorHoles = legacyTotalHoles(deviceparameter_Collimator);
 	long long idx = static_cast<long long>(blockIdx.x) * static_cast<long long>(blockDim.x) + static_cast<long long>(threadIdx.x);
 	long long total_threads = static_cast<long long>(numCollimatorHoles) * static_cast<long long>(numProjectionSingle) * static_cast<long long>(numProjectionSingle);
 
@@ -1517,6 +1543,7 @@ __global__ void geometryRelationShip_Collimator2Crystal(unsigned int * dst_relat
 }
 
 
+// PE_SysMat is not needed for collimator scatter (kept in the signature for the caller)
 int scatter(float* parameter_Collimator, float* parameter_Detector, float* parameter_Image, float* parameter_Physics,float* PE_SysMat,const char* FnameGeo, float* dst, int cuda_id)
 {
 
@@ -1531,7 +1558,7 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 
 	int numProjectionSingle = (int)floor(parameter_Detector[0]+0.0001f);
 	int numImagebin = numPSFImageVoxelX * numPSFImageVoxelY * numPSFImageVoxelZ;
-	int numCollimator_Holes = (int)parameter_Collimator[10];
+	int numCollimator_Holes = legacyTotalHoles(parameter_Collimator);
 
 	
 	int deviceCount;
@@ -1591,18 +1618,12 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 	cudaCheckError(cudaMallocHost(&h_parameter_Physics, sizeof(float) * 100));
 	memcpy(h_parameter_Physics, parameter_Physics, sizeof(float) * 100);
 
-	float* h_PE_SysMat;
-	cudaCheckError(cudaMallocHost(&h_PE_SysMat, sizeof(float) * numProjectionSingle * numImagebin));
-	memcpy(h_PE_SysMat, PE_SysMat, sizeof(float) * numProjectionSingle * numImagebin);
 
 	
 	float* deviceMatrix;
 	cudaCheckError(cudaMalloc(&deviceMatrix, sizeof(float) * numProjectionSingle * numImagebin));
 	cudaCheckError(cudaMemset(deviceMatrix, 0, sizeof(float) * numProjectionSingle * numImagebin));
 
-	float* devicePEMatrix;
-	cudaCheckError(cudaMalloc(&devicePEMatrix, sizeof(float) * numProjectionSingle * numImagebin));
-	cudaCheckError(cudaMemcpyAsync(devicePEMatrix, h_PE_SysMat, sizeof(float) * numProjectionSingle * numImagebin, cudaMemcpyHostToDevice, stream));
 
 	float* deviceparameter_Collimator;
 	cudaCheckError(cudaMalloc(&deviceparameter_Collimator, sizeof(float) * 80000));
@@ -1739,13 +1760,11 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 	cudaFreeHost(h_parameter_Detector);
 	cudaFreeHost(h_parameter_Image);
 	cudaFreeHost(h_parameter_Physics);
-	cudaFreeHost(h_PE_SysMat);
 	cudaFree(deviceparameter_Collimator);
 	cudaFree(deviceparameter_Detector);
 	cudaFree(deviceparameter_Image);
 	cudaFree(deviceparameter_Physics);
 	cudaFree(deviceMatrix);
-	cudaFree(devicePEMatrix);
 	cudaFree(deviceGeometryRelationShip_Collimator2Crystal);
 
 	delete[] hostGeometryRelationShip_Collimator2Crystal;

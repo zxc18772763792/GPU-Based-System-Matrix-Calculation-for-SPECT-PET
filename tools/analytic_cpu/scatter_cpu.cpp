@@ -49,7 +49,7 @@ int main(int argc, char** argv) {
     int nVX = (int)floor(img[0] + 0.001f), nVY = (int)floor(img[1] + 0.001f), nVZ = (int)floor(img[2] + 0.001f);
     int nP = (int)floor(det[0] + 0.0001f), nI = nVX * nVY * nVZ;
     int nRot = (int)floor(img[6] + 0.001f);
-    int nHoles0 = (int)floor(col[10] + 0.01f);          // the legacy kernels use the holes of layer 0
+    int nHoles0 = legacyTotalHoles(col.data());         // the legacy collimator kernel uses the holes of all layers
     {   // same limits as the GPU programs (80000-float parameter buffers)
         int nL = (int)floor(col[0] + 0.001f);
         long long nH = 0;

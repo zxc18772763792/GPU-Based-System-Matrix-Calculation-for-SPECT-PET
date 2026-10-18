@@ -1553,6 +1553,28 @@ __global__ void geometryRelationShip_Crystal2Crystal(unsigned int * dst_relation
 
 
 
+// Holes of all collimator layers, stored one layer after the other from index 100 on (layer 0 first).
+// The legacy collimator-scatter kernels use every hole with the coefficients of its own layer.
+__host__ __device__ inline int legacyTotalHoles(const float* col)
+{
+	int nLayers = (int)floor(col[0] + 0.001f);
+	int n = 0;
+	for (int m = 0; m < nLayers && m < 9; m++) n += (int)floor(col[(m + 1) * 10] + 0.001f);
+	return n;
+}
+
+__host__ __device__ inline int legacyHoleLayer(const float* col, int hole)
+{
+	int nLayers = (int)floor(col[0] + 0.001f);
+	int end = 0;
+	for (int m = 0; m < nLayers && m < 9; m++)
+	{
+		end += (int)floor(col[(m + 1) * 10] + 0.001f);
+		if (hole < end) return m;
+	}
+	return 0;
+}
+
 __global__ void collimatorScatterSysMatCuda(float* dst,
 	float* deviceparameter_Collimator,
 	float* deviceparameter_Detector,
@@ -1564,7 +1586,7 @@ __global__ void collimatorScatterSysMatCuda(float* dst,
 
 {
 
-	int numCollimator_Holes = (int)floor(deviceparameter_Collimator[10] + 0.000001f);
+	int numCollimator_Holes = legacyTotalHoles(deviceparameter_Collimator);   // all layers (was layer 0 only)
 	int numDetectorbins = numProjectionSingle;
 
 	float _float_FOV2Collimator = deviceparameter_Image[11];
@@ -1726,7 +1748,11 @@ __global__ void collimatorScatterSysMatCuda(float* dst,
 
 
 	float solid_angle = (virtual_r * virtual_r * M_PI + (deviceparameter_Collimator[id_CollimatorHole * 9 + 102] - deviceparameter_Collimator[id_CollimatorHole * 9 + 101]) * virtual_r) / (4.0f * M_PI * L_image_hole * L_image_hole) * fabs(y_scatter - yImage) / L_image_hole;
-	float prob_Compton_otherCollimatorHole = solid_angle / deviceparameter_Collimator[15] * deviceparameter_Collimator[17];
+	// Compton / total attenuation of the layer this hole belongs to (was always layer 0)
+	int layerOfHole = legacyHoleLayer(deviceparameter_Collimator, id_CollimatorHole);
+	float coeffLayerTotal = deviceparameter_Collimator[(layerOfHole + 1) * 10 + 5];
+	float coeffLayerCompton = deviceparameter_Collimator[(layerOfHole + 1) * 10 + 7];
+	float prob_Compton_otherCollimatorHole = coeffLayerTotal > 0.0f ? solid_angle / coeffLayerTotal * coeffLayerCompton : 0.0f;
 	float length = 0.0f;
 	//////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -1954,7 +1980,7 @@ __global__ void geometryRelationShip_Collimator2Crystal(unsigned int* dst_relati
 {
 	
 	int numProjectionSingle = deviceparameter_Detector[0];
-	int numCollimatorHoles = deviceparameter_Collimator[10];
+	int numCollimatorHoles = legacyTotalHoles(deviceparameter_Collimator);
 	long long idx = static_cast<long long>(blockIdx.x) * static_cast<long long>(blockDim.x) + static_cast<long long>(threadIdx.x);
 	long long total_threads = static_cast<long long>(numCollimatorHoles) * static_cast<long long>(numProjectionSingle) * static_cast<long long>(numProjectionSingle);
 
@@ -3174,7 +3200,7 @@ int scatter(float* parameter_Collimator, float* parameter_Detector, float* param
 	// Calculate geometry relationship between each crystal and collimator holes, if the crystal_k is cross the line of 
 	// collimator_i and crystal_j, then deviceGeometryRelationShip[i,j,k]=1,else =0.
 	// The array deviceGeometryRelationShip is a bitmap, the array is stored by bit, the index follows the belowing rules:
-	int numCollimator_Holes = (int)floor(parameter_Collimator[10]+0.01f);
+	int numCollimator_Holes = legacyTotalHoles(parameter_Collimator);
 	total_bits = static_cast<long long>(numProjectionSingle)
 		* static_cast<long long>(numProjectionSingle)
 		* static_cast<long long>(numCollimator_Holes);
