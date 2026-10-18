@@ -7,11 +7,16 @@
 //   maxLateral = detDiag * 0.5 * t_to_col + safety_margin
 // (no division by distance — t_to_col is already a dimensionless fraction)
 //
-// Structure:
+// Structure (one thread per detector x voxel):
 //   1. Per-thread early exits (cheap geometric checks)
-//   2. Pre-collect nearby holes from spatial hash (ONCE, deduplicated)
-//   3. Pre-collect nearby detectors via angular culling (ONCE)
-//   4. 1024-subelement loop using pre-collected lists
+//   2. Pre-collect the holes the voxel -> crystal rays can cross: spatial hash of the holes, searched per
+//      layer over the lateral box of those rays (deduplicated)
+//   3. Pre-collect the crystals they can cross: vertical-prism test against the voxel -> crystal beam
+//      (bounding-sphere cone test of the original code when the voxel is not below the crystal)
+//   4. 1024-subelement loop over the pre-collected lists; per ray, a prism test (about 15 flops) skips the
+//      holes and crystals the ray cannot hit before the full intersection functions are called, and rays
+//      well inside the collimator plate skip the plate test.  All pre-tests are conservative: results are
+//      identical to evaluating every candidate.
 //
 // original author: xingchun zheng @ tsinghua university
 
@@ -372,16 +377,39 @@ __device__ float length_cylinder_ray(
 #define PE_MAX_CROSS_DET 256    // other crystals a voxel -> crystal cone can cross
 #endif
 
-// Can a ray from the voxel to crystal idxDet pass through crystal id?  (cones around the two
-// voxel -> crystal-centre directions with the half-angles of the crystals' bounding spheres overlap)
+// The detecting crystal as seen from the voxel: its centre, y range and the radius of the vertical prism
+// that contains it (crystals are rotated about y only).
+struct PETarget { float cx, cz, y1, y2, r; };
+
+// Can a ray from the voxel to crystal idxDet pass through crystal id?
+// Voxel below the detecting crystal (the usual case): a ray to a point of the target's prism is, at a
+// fraction s of its height, within r_target * s of the line voxel -> target axis; crystal id (prism of
+// radius r_id over [y1, y2]) can only be crossed for s in [(y1 - yV) / (target.y2 - yV), (y2 - yV) /
+// (target.y1 - yV)], so it is a candidate only if its axis comes within r_id + r_target * s_max of that
+// part of the line.  This is much tighter than bounding spheres for tall crystals.
+// Otherwise: cones around the two voxel -> crystal-centre directions with the half-angles of the
+// crystals' bounding spheres overlap (the original test).
 __device__ inline bool peCrossCandidate(const float* devDet, int id, int idxDet, float fov2col,
                                         float xImage, float yImage, float zImage,
-                                        float xDir, float yDir, float zDir, float crit_self)
+                                        float xDir, float yDir, float zDir, float crit_self,
+                                        const PETarget& tg)
 {
     if (id == idxDet) return false;
     float ow = devDet[12*id+4], ot = devDet[12*id+5], oh = devDet[12*id+6];
     if (devDet[12*id+7] <= 0.01f) return false;
     float ox = devDet[12*id+1], oy = devDet[12*id+2]+fov2col, oz = devDet[12*id+3];
+    if (tg.y1 - yImage > 1e-3f) {
+        float s0 = fmaxf((oy - 0.5f*ot - yImage) / (tg.y2 - yImage), 0.0f);
+        float s1 = fminf((oy + 0.5f*ot - yImage) / (tg.y1 - yImage), 1.0f);
+        if (s1 < s0) return false;                       // entirely below the voxel or above the target
+        float ax = xImage + (tg.cx - xImage) * s0 - ox, az = zImage + (tg.cz - zImage) * s0 - oz;
+        float ex = (tg.cx - xImage) * (s1 - s0), ez = (tg.cz - zImage) * (s1 - s0);
+        float ee = ex*ex + ez*ez;
+        float t = ee > 0.0f ? fminf(fmaxf(-(ax*ex + az*ez) / ee, 0.0f), 1.0f) : 0.0f;
+        float qx = ax + t*ex, qz = az + t*ez;
+        float rr = (0.5f * sqrtf(ow*ow + oh*oh) + tg.r * s1) * 1.0001f + 1e-4f;
+        return qx*qx + qz*qz <= rr*rr;
+    }
     float od = sqrtf((xImage-ox)*(xImage-ox)+(yImage-oy)*(yImage-oy)+(zImage-oz)*(zImage-oz));
     float crit_o = sqrtf(ow*ow+oh*oh+ot*ot) / od / 2.0f;
     float dxo = (ox-xImage)/od, dyo = (oy-yImage)/od, dzo = (oz-zImage)/od;
@@ -603,11 +631,12 @@ __global__ void photodetectorCudaMe(
     float yDir = (yDC-yImage)/dist_vd;
     float zDir = (zDC-zImage)/dist_vd;
 
+    PETarget tg = { xDC, zDC, yDC - 0.5f*tDet, yDC + 0.5f*tDet, 0.5f * sqrtf(wDet*wDet + hDet*hDet) };
     int crossDetIds[PE_MAX_CROSS_DET];
     int nCrossDet = 0;
     bool crossOverflow = false;
     for (int id = 0; id < numDetBins && !crossOverflow; id++) {
-        if (!peCrossCandidate(devDet, id, (int)idxDet, fov2col, xImage, yImage, zImage, xDir, yDir, zDir, crit_self)) continue;
+        if (!peCrossCandidate(devDet, id, (int)idxDet, fov2col, xImage, yImage, zImage, xDir, yDir, zDir, crit_self, tg)) continue;
         if (nCrossDet == PE_MAX_CROSS_DET) { crossOverflow = true; break; }
         crossDetIds[nCrossDet++] = id;
     }
@@ -670,6 +699,15 @@ __global__ void photodetectorCudaMe(
                 float dzdy = preTest ? (zDet - zImage) / dyRay : 0.0f;
 
                 for (int m = 0; m < numColLayers; m++) {
+                    // rays that cross both faces of the plate well inside its edges traverse at least its
+                    // thickness (>= 0.2 mm here), so the test below cannot block them
+                    if (preTest && colThick[m] >= 0.2f && yDet > colY2[m]) {
+                        float xa = xImage + dxdy * (colY1[m] - yImage), za = zImage + dzdy * (colY1[m] - yImage);
+                        float xb = xImage + dxdy * (colY2[m] - yImage), zb = zImage + dzdy * (colY2[m] - yImage);
+                        float mx = colHalfX[m] - 0.01f, mz = colHalfZ[m] - 0.01f;
+                        if (colY1[m] > yImage && fabsf(xa) < mx && fabsf(xb) < mx && fabsf(za) < mz && fabsf(zb) < mz)
+                            continue;
+                    }
                     float tl = length_box_ray(xImage, yImage, zImage, xDet, yDet, zDet,
                                               -colHalfX[m], colY1[m], -colHalfZ[m],
                                                colHalfX[m], colY2[m],  colHalfZ[m]);
@@ -707,7 +745,7 @@ __global__ void photodetectorCudaMe(
                 for (int ii = 0; ii < (crossOverflow ? numDetBins : nCrossDet); ii++) {
                     int oid = ii;
                     if (!crossOverflow) oid = crossDetIds[ii];
-                    else if (!peCrossCandidate(devDet, oid, (int)idxDet, fov2col, xImage, yImage, zImage, xDir, yDir, zDir, crit_self)) continue;
+                    else if (!peCrossCandidate(devDet, oid, (int)idxDet, fov2col, xImage, yImage, zImage, xDir, yDir, zDir, crit_self, tg)) continue;
                     float ox = devDet[12*oid+1], oy = devDet[12*oid+2]+fov2col, oz = devDet[12*oid+3];
                     float ow = devDet[12*oid+4], ot = devDet[12*oid+5], oh = devDet[12*oid+6];
                     if (preTest && !peRayNearAxis(xImage, yImage, zImage, dxdy, dzdy, oy - 0.5f*ot, oy + 0.5f*ot,
