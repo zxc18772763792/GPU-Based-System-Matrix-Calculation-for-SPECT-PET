@@ -389,6 +389,23 @@ __device__ inline bool peCrossCandidate(const float* devDet, int id, int idxDet,
     return ad <= crit_o + crit_self;
 }
 
+// Cheap exact rejection for one ray (voxel -> detector sub-element): holes are cylinders along y and
+// crystals are boxes rotated about y, so each lies inside a vertical prism of radius r around (cx, cz)
+// over [ya, yb].  If the x-z track of the ray over [ya, yb] never comes within r of the axis, the
+// intersection length is exactly 0 and the full intersection function can be skipped.
+// Valid for rays with dy = yDet - yImage > 0 (all rays of the kernel; others are not tested).
+__device__ inline bool peRayNearAxis(float xI, float yI, float zI, float dxdy, float dzdy,
+                                     float ya, float yb, float cx, float cz, float r)
+{
+    float ax = xI + dxdy * (ya - yI) - cx, az = zI + dzdy * (ya - yI) - cz;   // track at y = ya
+    float ex = dxdy * (yb - ya), ez = dzdy * (yb - ya);                       // ... to y = yb
+    float ee = ex*ex + ez*ez;
+    float t = ee > 0.0f ? fminf(fmaxf(-(ax*ex + az*ez) / ee, 0.0f), 1.0f) : 0.0f;
+    float qx = ax + t*ex, qz = az + t*ez;
+    float rr = r * 1.0001f + 1e-4f;                                           // margin for rounding
+    return qx*qx + qz*qz <= rr*rr;
+}
+
 // Spatial hash of the collimator holes (host): every hole is listed in all cells its disk overlaps;
 // cells hold as many holes as needed (no truncation).
 struct PEHoleHash {
@@ -645,6 +662,12 @@ __global__ void photodetectorCudaMe(
 
                 float atten = 0.0f;
                 bool blocked = false;
+                // slopes of the ray in x and z per unit y, for the prism pre-tests (dy > 0 for every ray
+                // that reaches the crystal through the collimator; otherwise the pre-tests are skipped)
+                float dyRay = yDet - yImage;
+                bool preTest = dyRay > 1e-3f;
+                float dxdy = preTest ? (xDet - xImage) / dyRay : 0.0f;
+                float dzdy = preTest ? (zDet - zImage) / dyRay : 0.0f;
 
                 for (int m = 0; m < numColLayers; m++) {
                     float tl = length_box_ray(xImage, yImage, zImage, xDet, yDet, zDet,
@@ -664,9 +687,11 @@ __global__ void photodetectorCudaMe(
                         while (layer < numColLayers - 1 && hid >= layerEnd) layerEnd += colNHoles[++layer];
                         hl = layer;
                     } else { hid = holeIds[ii]; hl = holeLayers[ii]; }
-                    float tmp = length_cylinder_ray(xImage, yImage, zImage, xDet, yDet, zDet,
-                        devCol[hid*9+100], devCol[hid*9+101]+fov2col, devCol[hid*9+102]+fov2col,
-                        devCol[hid*9+103], devCol[hid*9+104]);
+                    float hx = devCol[hid*9+100], hy1 = devCol[hid*9+101]+fov2col, hy2 = devCol[hid*9+102]+fov2col;
+                    float hz = devCol[hid*9+103], hr = devCol[hid*9+104];
+                    if (preTest && !peRayNearAxis(xImage, yImage, zImage, dxdy, dzdy, fminf(hy1, hy2), fmaxf(hy1, hy2), hx, hz, hr))
+                        continue;                                   // the ray misses this hole: length 0
+                    float tmp = length_cylinder_ray(xImage, yImage, zImage, xDet, yDet, zDet, hx, hy1, hy2, hz, hr);
                     holeLen[hl] += tmp;
                     atten += devCol[hid*9+105] * tmp;
                 }
@@ -685,6 +710,9 @@ __global__ void photodetectorCudaMe(
                     else if (!peCrossCandidate(devDet, oid, (int)idxDet, fov2col, xImage, yImage, zImage, xDir, yDir, zDir, crit_self)) continue;
                     float ox = devDet[12*oid+1], oy = devDet[12*oid+2]+fov2col, oz = devDet[12*oid+3];
                     float ow = devDet[12*oid+4], ot = devDet[12*oid+5], oh = devDet[12*oid+6];
+                    if (preTest && !peRayNearAxis(xImage, yImage, zImage, dxdy, dzdy, oy - 0.5f*ot, oy + 0.5f*ot,
+                                                  ox, oz, 0.5f * sqrtf(ow*ow + oh*oh)))
+                        continue;                                   // the ray misses this crystal: length 0
                     float oc = devDet[12*oid+7], orot = devDet[12*oid+11];
                     float cosA = cosf(-orot), sinA = sinf(-orot);
                     float dxIA = xImage-ox, dzIA = zImage-oz;
